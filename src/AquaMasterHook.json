@@ -1,0 +1,19 @@
+{
+  "event": "AquaMaster_hook",
+  "url": "https://things.ubidots.com/api/v1.6/devices/{{PARTICLE_DEVICE_ID}}/?token=6EALvOEabrFiA6XViWY3hxcFMG0yDr",
+  "requestType": "POST",
+  "mydevices": true,
+  "noDefaults": true,
+  "responseTemplate": "{{watering.0.status_code}}",
+  "responseTopic": "{{PARTICLE_DEVICE_ID}}_AquaMaster_hook",
+  "json":{
+    "SoilTemp":"{{SoilTemp}}",
+    "Watering":{
+      "value": "{{Watering}}",
+      "context": {
+        "key1":"{{key1}}"
+        }
+    },
+    "Moisture":"{{Moisture}}"
+  }
+}

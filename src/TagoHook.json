@@ -1,0 +1,23 @@
+{
+  "event": "Tago_hook",
+  "url": "https://api.tago.io/data",
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Auth-Token": "ca72d88c-6041-4fe8-a5bb-a36a79fa4e7a"
+  },
+  "requestType": "POST",
+  "mydevices": true,
+  "noDefaults": true,
+  "json":[{
+      "variable": "SoilTemp",
+      "unit":"F",
+      "value":"{{SoilTemp}}"
+      }, {
+	    "variable":"Watering",
+	    "value":"{{Watering}}",
+	    "metadata": {"key1":"{{context}}"}
+      } , {
+	    "variable":"Moisture",
+	    "value":"{{Moisture}}"
+      }]
+}
