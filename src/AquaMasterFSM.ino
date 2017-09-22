@@ -8,26 +8,27 @@
 
  To see Finite State Machine Diagram, past this uml code below in http://www.plantuml.com/plantuml/uml
  @startuml
- skinparam backgroundColor LightYellow
+skinparam backgroundColor LightYellow
  skinparam state {
   BackgroundColor LightBlue
   BorderColor Gray
   FontName Impact
  }
  [*] --> Initializing
- Initializing: 10 seconds
- Initializing --> Waiting: Success
- Initializing --> Resetting: Failure
- Waiting --> Measuring: New Hour
- Measuring --> Authorizing: New Measurements
- Measuring --> Resetting: Bad Data
- Authorizing --> Analyzing: Authorized
- Authorizing --> Reporting: Not Enabled or Not Time
- Analyzing --> Watering: Duration Assigned
+ Initializing --> Idle: Success
+ Initializing --> Error: Failure
+ Idle --> SensorData: New Hour
+ SensorData --> RainForecast: Valid Data
+ SensorData --> Error: Bad Data
+ RainForecast --> WaterOrNot: New Measurements
+ WaterOrNot --> WaterAmount: Water Needed
+ WaterOrNot --> Reporting: Water Not Needed
+ WaterAmount --> Watering: Amount Solved
  Watering --> Reporting: Watering Complete
- Reporting --> Waiting: Reprting Complete
- Reporting --> Resetting: Bad Report
- @enduml
+ Reporting --> WaitResponse: Report Sent
+ WaitResponse --> Error: Bad Report
+ WaitResponse --> Idle: Reported
+@enduml
 
 */
 
@@ -35,7 +36,7 @@ STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high 
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.13"
+#define SOFTWARERELEASENUMBER "0.15"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -50,16 +51,31 @@ const int donePin = D2;                     // Pin the Electron uses to "pet" th
 const int wakeUpPin = A7;                   // This is the Particle Electron WKP pin
 const int flowPin = A2;                     // Where the flow meter pulse comes in
 
-// Watering Variables
+// Timing Variables
+unsigned long publishTimeStamp = 0;         // Keep track of when we publish a webhook
+unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
+unsigned long webhookWaitTime = 10000;      // How long will we let a webhook go before we give up
+unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
+bool waiting = false;                       // To keep track of waitin vs initializing a reporting event or webhook
+int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
+int lastWateredDayAddr = 4;
+int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
+int lastWateredPeriod = 0;                  // So we only wanter once an hour
+int lastWateredDay = 0;                     // Need to reset the last watered period each day
+int currentDay = 0;                         // Updated so we can tell which day we last watered
+
+// Watering Variables
 int shortWaterMinutes = 1;                  // Short watering cycle
 int longWaterMinutes = 5;                   // Long watering cycle - must be shorter than watchdog interval!
 int wateringMinutes = 0;                    // How long will we water based on time or Moisture
 int startWaterHour = 5;                     // When can we start watering
 int stopWaterHour = 8;                      // When do we stop for the day
-int wateringNow = 0;                        // Status - watering?
+bool watering = false;                      // Status - watering?
 int waterEnabled = 1;                       // Allows you to disable watering from the app or Ubidots
 float expectedRainfallToday = 0;            // From Weather Underground Simple Forecast qpf_allday
+int forecastDay = 0;                        // So we can know when we get a response from Weather Underground
+unsigned long wateringStarted = 0;
 
 // Measurement Variables
 char Signal[17];                            // Used to communicate Wireless RSSI and Description
@@ -70,22 +86,14 @@ int capValue = 0;                           // This is where we store the soil m
 int soilTemp = 0;                           // Soil Temp is measured 3" deep
 char Moisture[15];                          // Combines description and capValue
 
-// Time Period Variables
-int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
-int lastWateredPeriod = 0;                  // So we only wanter once an hour
-int lastWateredDay = 0;                     // Need to reset the last watered period each day
-int currentDay = 0;                         // Updated so we can tell which day we last watered
-
 // Control Variables
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 bool doneEnabled = true;           // This enables petting the watchdog
-int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
-int lastWateredDayAddr = 4;
 char wateringContext[25];                   // Why did we water or not sent to Ubidots for context
 float rainThreshold = 0.4;                  // Expected rainfall in inches which would cause us not to water
 
 // State Maching Variables
-enum State { INITIALIZATION_STATE, RESETTING_STATE, WAITING_STATE, MEASURING_STATE, AUTHORIZING_STATE, ANALYZING_STATE, WATERING_STATE, REPORTING_STATE };
+enum State { INITIALIZATION_STATE, ERROR_STATE, RESETTING_STATE, IDLE_STATE, SENSOR_DATA_STATE, RAIN_FORECAST_STATE, WATER_OR_NOT_STATE, WATER_AMT_STATE, WATERING_STATE, REPORTING_STATE, WAIT_RESP_STATE };
 State state = INITIALIZATION_STATE;
 
 void setup() {
@@ -98,8 +106,7 @@ void setup() {
   pinMode(wakeUpPin,INPUT_PULLDOWN);        // The signal from the watchdog is active HIGH
   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
 
-  Particle.variable("Watering", wateringNow);       // These variables are used to monitor the device will reduce them over time
-  Particle.variable("WiFiStrength", Signal);
+  Particle.variable("WiFiStrength", Signal);      // These variables are used to monitor the device will reduce them over time
   Particle.variable("Moisture", Moisture);
   Particle.variable("Enabled", waterEnabled);
   Particle.variable("Release",releaseNumber);
@@ -123,8 +130,8 @@ void setup() {
   EEPROM.get(lastWateredPeriodAddr,lastWateredPeriod);    // Load the last watered period from EEPROM
   EEPROM.get(lastWateredDayAddr,lastWateredDay);          // Load the last watered day from EEPROM
 
-  if (sensor.getAddress() == 32) state = WAITING_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
-  else state = RESETTING_STATE;
+  if (sensor.getAddress() == 32) state = IDLE_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
+  else state = ERROR_STATE;
 }
 
 
@@ -132,29 +139,47 @@ void loop() {
 
   switch(state) {
 
-    case WAITING_STATE:
+    case IDLE_STATE:
       if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
       {
         currentPeriod = Time.hour();                          // Set the new current period
         currentDay = Time.day();                              // Sets the current Day
         // This next line protects against a reboot causing rewatering in same period
-        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) state = MEASURING_STATE;
+        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) state = SENSOR_DATA_STATE;
       }
       break;
 
-    case MEASURING_STATE:
-      Particle.publish("weatherU_hook");                    // Get the weather forcast
-      NonBlockingDelay(5000);                               // Give the Weather Underground time to respond
+    case SENSOR_DATA_STATE:
       getWiFiStrength();                                    // Get the WiFi Signal strength
       soilTemp = int(sensor.getTemperature()/(float)10);    // Get the Soil temperature
-      if (getMoisture()) state = AUTHORIZING_STATE;         // Test soil Moisture - if valid then proceed
-      else state = RESETTING_STATE;
+      if (getMoisture()) state = RAIN_FORECAST_STATE;         // Test soil Moisture - if valid then proceed
+      else state = ERROR_STATE;
       break;
 
-    case AUTHORIZING_STATE:
-      if (currentPeriod >= startWaterHour && currentPeriod <= stopWaterHour)
+    case RAIN_FORECAST_STATE:
+      if (!waiting)
       {
-        if (waterEnabled) state = ANALYZING_STATE;
+        publishTimeStamp = millis();                          // So we can know how long to wait
+        waiting = true;
+        forecastDay = 0;
+        Particle.publish("weatherU_hook");                    // Get the weather forcast
+      }
+      if (waiting && !forecastDay)
+      {
+        waiting = false;
+        state = WATER_OR_NOT_STATE;
+      }
+      if (waiting && (millis() >= (publishTimeStamp + webhookWaitTime)))
+      {
+        state = WATER_OR_NOT_STATE;                           // May change in the future - for now press on
+        waiting = false;
+      }
+      break;
+
+    case WATER_OR_NOT_STATE:
+      if (currentPeriod <= startWaterHour && currentPeriod <= stopWaterHour)
+      {
+        if (waterEnabled) state = WATER_AMT_STATE;
         else {
           state = REPORTING_STATE;
           strcpy(wateringContext,"Not Enabled");
@@ -166,7 +191,7 @@ void loop() {
       }
       break;
 
-    case ANALYZING_STATE:
+    case WATER_AMT_STATE:
       wateringMinutes = 0;
       state = REPORTING_STATE;      // Assume no watering needed
       if ((strncmp(Moisture,"Very Dry",8) == 0) || (strncmp(Moisture,"Dry",3) == 0) || (strncmp(Moisture,"Normal",6) == 0))
@@ -184,56 +209,65 @@ void loop() {
       break;
 
     case WATERING_STATE:
-      static long waterTime = wateringMinutes * oneMinuteMillis;    // Set the watering duration
-      turnOnWater(waterTime);                               // Starts the watering function
-      state = REPORTING_STATE;                                  // If this fails, the watchdog will reset
+      if (!watering)
+      {
+        digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
+        digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
+        doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
+        digitalWrite(blueLED, HIGH);                            // Light on for watering
+        digitalWrite(solenoidPin, HIGH);                        // Turn on the water
+        watering = true;
+        wateringStarted = millis();
+      }
+      if (watering && (millis() >= (wateringStarted + wateringMinutes*oneMinuteMillis)))
+      {
+        digitalWrite(blueLED, LOW);                             // Turn everything off
+        digitalWrite(solenoidPin, LOW);
+        watering = false;
+        doneEnabled = true;                                     // Successful response - can pet the dog again
+        digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
+        digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
+        lastWateredDay = currentDay;
+        lastWateredPeriod = currentPeriod;
+        EEPROM.put(lastWateredPeriodAddr,currentPeriod);        // Sets the last watered period to the current one
+        EEPROM.put(lastWateredDayAddr,currentDay);              // Stored in EEPROM since this issue only comes in case of a reset
+        state = REPORTING_STATE;                                  // If this fails, the watchdog will reset
+      }
       break;
 
     case REPORTING_STATE:
-      sendToUbidots();
-      NonBlockingDelay(10000);                      // Wait for 10 seconds for the hook to get a response
-      if (doneEnabled) state = WAITING_STATE;       // This is how we know if Ubidots got the data
-      else state = RESETTING_STATE;
+      if (!waiting)                                             // Mark the timestamp and report the data to Ubidots
+      {
+        publishTimeStamp = millis();
+        waiting = true;
+        sendToUbidots();
+      }
+      else if (waiting && doneEnabled)                          // This is an indication that the data was successfully reported and recorded
+      {
+        state = IDLE_STATE;
+        waiting = false;
+      }
+      else if (waiting && (millis() >= publishTimeStamp + webhookWaitTime))   // If we have been waiting too long - timeout
+      {
+        state = ERROR_STATE;
+        waiting = false;
+      }
       break;
 
-    case RESETTING_STATE:
-      Particle.publish("State","Resetting in 30sec");
-      NonBlockingDelay(30000);
-      System.reset();
-      state = WAITING_STATE;    // Not sure if this is needed
+    case ERROR_STATE:                               // Set up so I could have other error recovery options than just reset in the future
+      if (!waiting)
+      {
+        waiting = true;
+        resetWaitTimeStamp = millis();
+        Particle.publish("State","Resetting in 30sec");
+      }
+      if (millis() >= (resetWaitTimeStamp + resetWaitTime)) System.reset();
       break;
   }
-  NonBlockingDelay(1000);
 }
 
 void turnOnWater(unsigned long duration)                  // Where we water the plants - critical function completes
 {
-  // We are going to use the watchdog timer to ensure this function completes successfully
-  // Need a watchdog interval that is slighly longer than the longest watering cycle
-  // We will pet the dog then disable petting until the end of the function
-  // That way, if the Particle freezes while the water is on, it will be reset by the watchdog
-  // Upon reset, the water will be turned off averting disaster
-  digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
-  digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
-  // Uncomment this next line only after you are sure your watchdog timer interval is greater than watering period
-  doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
-  // If anything in this section hangs, the watchdog will reset the Photon
-  digitalWrite(blueLED, HIGH);                            // Light on for watering
-  digitalWrite(solenoidPin, HIGH);                        // Turn on the water
-  wateringNow = 1;                                        // This is a Particle.variable so you can see from the app
-  NonBlockingDelay(duration);                             // Delay for the watering period
-  digitalWrite(blueLED, LOW);                             // Turn everything off
-  digitalWrite(solenoidPin, LOW);
-  wateringNow = 0;
-  // End mission - critical session
-  doneEnabled = true;                                     // Successful response - can pet the dog again
-  digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
-  digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
-  lastWateredDay = currentDay;
-  lastWateredPeriod = currentPeriod;
-  EEPROM.put(lastWateredPeriodAddr,currentPeriod);        // Sets the last watered period to the current one
-  EEPROM.put(lastWateredDayAddr,currentDay);              // Stored in EEPROM since this issue only comes in case of a reset
-  Particle.publish("Watering","Done");
 }
 
 void sendToUbidots()                                      // Houly update to Ubidots for serial data logging and analysis
@@ -260,8 +294,6 @@ int startStop(String command)                             // So we can manually 
   {
     digitalWrite(blueLED, LOW);                           // Turn off light
     digitalWrite(solenoidPin, LOW);                       // Turn off water
-    wateringNow = 0;                                      // Update Particle.variable
-    Particle.publish("Watering","Done");                  // publish
     return 1;
   }
   return 0;
@@ -285,7 +317,7 @@ int takeMeasurements(String command)
 {
   if (command == "1")                                   // Default - enabled
   {
-    state = MEASURING_STATE;
+    state = SENSOR_DATA_STATE;
     return 1;
   }
   else return 0;                                              // Never get here but if we do, let's be safe and disable
@@ -317,16 +349,6 @@ int getMoisture()                                        // Here we get the soil
   return 1;
 }
 
-void NonBlockingDelay(int millisDelay)                    // Used for a non-blocking delay - will allow for interrrupts and Particle calls
-{
-  unsigned long commandTime = millis();
-  while (millis() <= millisDelay + commandTime)
-  {
-    Particle.process();                                   // This ensures that we can still service Particle processes
-  }
-  return;
-}
-
 void weatherHandler(const char *event, const char *data)  // Extracts the expected rainfall for today from webhook response
 {
   // Uses forecast JSON for Raleigh-Durham Airport
@@ -340,7 +362,7 @@ void weatherHandler(const char *event, const char *data)  // Extracts the expect
   }
   char strBuffer[30] = "";                                // Create character array to hold response
   strcpy(strBuffer,data);                                 // Copy into the array
-  int forecastDay = atoi(strtok(strBuffer, "\"~"));       // Use the delimiter to find today's date and expected Rainfall
+  forecastDay = atoi(strtok(strBuffer, "\"~"));       // Use the delimiter to find today's date and expected Rainfall
   expectedRainfallToday = atof(strtok(NULL, "~"));
   snprintf(Rainfall,sizeof(Rainfall),"%4.2f",expectedRainfallToday);
   Particle.publish("Rainfall",Rainfall);
