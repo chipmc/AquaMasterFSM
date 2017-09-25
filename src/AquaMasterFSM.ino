@@ -34,7 +34,7 @@ STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high 
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.15"
+#define SOFTWARERELEASENUMBER "0.18"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -117,7 +117,7 @@ void setup() {
   String deviceID = System.deviceID();
   deviceID.toCharArray(responseTopic,125);
   Particle.subscribe(responseTopic, AquaMasterHandler, MY_DEVICES);       // Subscribe to the integration response event
-  Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
+  //Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
 
   Time.zone(-4);                            // Raleigh DST (watering is for the summer)
 
@@ -136,7 +136,6 @@ void setup() {
 void loop() {
 
   switch(state) {
-
     case IDLE_STATE:
       if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
       {
@@ -155,7 +154,7 @@ void loop() {
         state = ERROR_STATE;
         break;
       }
-      Particle.publish("weatherU_hook");                    // Get the weather forcast
+      //Particle.publish("weatherU_hook");                    // Get the weather forcast
       publishTimeStamp = millis();                          // So we can know how long to wait
       forecastDay = 0;                                      // So we know when we get an updated forecast
       state = FORECAST_WAIT_STATE;
@@ -183,7 +182,7 @@ void loop() {
           strcpy(wateringContext,"Not Time");
           break;
         }
-        else if (expectedRainfallToday <= rainThreshold)
+        else if (expectedRainfallToday > rainThreshold)
         {
           strcpy(wateringContext,"Heavy Rain Expected");
           break;
@@ -249,10 +248,6 @@ void loop() {
       if (millis() >= (resetWaitTimeStamp + resetWaitTime)) System.reset();
       break;
   }
-}
-
-void turnOnWater(unsigned long duration)                  // Where we water the plants - critical function completes
-{
 }
 
 void sendToUbidots()                                      // Houly update to Ubidots for serial data logging and analysis
