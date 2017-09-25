@@ -168,7 +168,7 @@ void loop() {
       break;
 
     case WATER_OR_NOT_STATE:
-      if (currentPeriod <= startWaterHour && currentPeriod <= stopWaterHour)
+      if (currentPeriod >= startWaterHour && currentPeriod <= stopWaterHour)
       {
         if (waterEnabled) state = WATER_AMT_STATE;
         else {
