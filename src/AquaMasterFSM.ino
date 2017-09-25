@@ -10,23 +10,22 @@
  @startuml
  skinparam backgroundColor LightYellow
  skinparam state {
-  BackgroundColor LightBlue
-  BorderColor Gray
-  FontName Impact
+   BackgroundColor LightBlue
+   BorderColor Gray
+   FontName Impact
  }
  [*] --> Initializing
  Initializing: 10 seconds
- Initializing --> Waiting: Success
- Initializing --> Resetting: Failure
- Waiting --> Measuring: New Hour
- Measuring --> Authorizing: New Measurements
- Measuring --> Resetting: Bad Data
- Authorizing --> Analyzing: Authorized
- Authorizing --> Reporting: Not Enabled or Not Time
- Analyzing --> Watering: Duration Assigned
- Watering --> Reporting: Watering Complete
- Reporting --> Waiting: Reprting Complete
- Reporting --> Resetting: Bad Report
+ Initializing -Down-> Idle: Success
+ Initializing -Down-> Error: Failure
+ Idle --> Sensing: New Hour
+ Sensing --> AwaitingForecast: Valid Data
+ Sensing -Left-> Error: Bad Data
+ AwaitingForecast -Left-> Watering: Done Waiting
+ Watering -Up-> Reporting: Watering Complete
+ Reporting -Up-> AwaitingReceipt: Report Sent
+ AwaitingReceipt -Right-> Idle: Reprting Complete
+ AwaitingReceipt -Right-> Error: Bad Report
  @enduml
 
 */
@@ -56,6 +55,7 @@ unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
 unsigned long webhookWaitTime = 10000;      // How long will we let a webhook go before we give up
 unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
+bool waiting = false;
 int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
 int lastWateredDayAddr = 4;
 int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
@@ -91,7 +91,7 @@ char wateringContext[25];                   // Why did we water or not sent to U
 float rainThreshold = 0.4;                  // Expected rainfall in inches which would cause us not to water
 
 // State Maching Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, RESETTING_STATE, IDLE_STATE, SENSOR_DATA_STATE, RAIN_FORECAST_STATE, WATER_OR_NOT_STATE, WATER_AMT_STATE, WATERING_STATE, REPORTING_STATE, WAIT_RESP_STATE };
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SENSING_STATE, FORECAST_WAIT_STATE, WATERING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
 State state = INITIALIZATION_STATE;
 
 void setup() {
@@ -143,65 +143,59 @@ void loop() {
         currentPeriod = Time.hour();                          // Set the new current period
         currentDay = Time.day();                              // Sets the current Day
         // This next line protects against a reboot causing rewatering in same period
-        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) state = SENSOR_DATA_STATE;
+        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) state = SENSING_STATE;
       }
       break;
 
-    case SENSOR_DATA_STATE:
+    case SENSING_STATE:
       getWiFiStrength();                                    // Get the WiFi Signal strength
       soilTemp = int(sensor.getTemperature()/(float)10);    // Get the Soil temperature
-      if (getMoisture()) state = RAIN_FORECAST_STATE;         // Test soil Moisture - if valid then proceed
-      else state = ERROR_STATE;
+      if (!getMoisture())                 // Test soil Moisture - if valid then proceed
+      {
+        state = ERROR_STATE;
+        break;
+      }
+      Particle.publish("weatherU_hook");                    // Get the weather forcast
+      publishTimeStamp = millis();                          // So we can know how long to wait
+      forecastDay = 0;                                      // So we know when we get an updated forecast
+      state = FORECAST_WAIT_STATE;
       break;
 
-    case RAIN_FORECAST_STATE:
-      if (!forecastDay)
-      {
-        Particle.publish("weatherU_hook");                    // Get the weather forcast
-        publishTimeStamp = millis();                          // So we can know how long to wait
-      }
+    case FORECAST_WAIT_STATE:
       if ((millis() >= (publishTimeStamp + webhookWaitTime)) || forecastDay)
       {
-        state = WATER_OR_NOT_STATE;
-        forecastDay = 0;
+        state = WATERING_STATE;
       }
-      break;
-
-    case WATER_OR_NOT_STATE:
-      if (currentPeriod >= startWaterHour && currentPeriod <= stopWaterHour)
-      {
-        if (waterEnabled) state = WATER_AMT_STATE;
-        else {
-          state = REPORTING_STATE;
-          strcpy(wateringContext,"Not Enabled");
-        }
-      }
-      else {
-        state = REPORTING_STATE;
-        strcpy(wateringContext,"Not Time");
-      }
-      break;
-
-    case WATER_AMT_STATE:
-      wateringMinutes = 0;
-      state = REPORTING_STATE;      // Assume no watering needed
-      if ((strncmp(Moisture,"Very Dry",8) == 0) || (strncmp(Moisture,"Dry",3) == 0) || (strncmp(Moisture,"Normal",6) == 0))
-      {
-        if (expectedRainfallToday <= rainThreshold)
-        {
-          if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
-          else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
-          state = WATERING_STATE;
-          strcpy(wateringContext,"Watering");
-        }
-        else strcpy(wateringContext,"Heavy Rain Expected");
-      }
-      else strcpy(wateringContext,"Not Needed");
       break;
 
     case WATERING_STATE:
       if (!watering)
       {
+        state = REPORTING_STATE;
+        wateringMinutes = 0;
+        if (!waterEnabled)
+        {
+          strcpy(wateringContext,"Not Enabled");
+          break;
+        }
+        else if (currentPeriod < startWaterHour && currentPeriod > stopWaterHour)
+        {
+          strcpy(wateringContext,"Not Time");
+          break;
+        }
+        else if (expectedRainfallToday <= rainThreshold)
+        {
+          strcpy(wateringContext,"Heavy Rain Expected");
+          break;
+        }
+        else if ((strncmp(Moisture,"Wet",3) == 0) || (strncmp(Moisture,"Very Wet",8) == 0) || (strncmp(Moisture,"Waterlogged",11) == 0))
+        {
+          strcpy(wateringContext,"Not Needed");
+          break;
+        }
+        if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
+        else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
+        strcpy(wateringContext,"Watering");
         digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
         digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
         doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
@@ -227,23 +221,34 @@ void loop() {
       break;
 
     case REPORTING_STATE:
-      sendToUbidots();
-      NonBlockingDelay(10000);                      // Wait for 10 seconds for the hook to get a response
-      if (doneEnabled) state = IDLE_STATE;       // This is how we know if Ubidots got the data
-      else state = ERROR_STATE;
+      if (!waiting)
+      {
+        publishTimeStamp = millis();
+        waiting = true;
+        sendToUbidots();
+      }
+      else if (waiting && doneEnabled)
+      {
+        state = IDLE_STATE;       // This is how we know if Ubidots got the data
+        waiting = false;
+      }
+      else if (waiting && millis() >= (publishTimeStamp + webhookWaitTime))
+      {
+        state = ERROR_STATE;
+        waiting = false;
+      }
       break;
 
     case ERROR_STATE:                               // Set up so I could have other error recovery options than just reset in the future
-      state = RESETTING_STATE;
-      resetWaitTimeStamp = millis();
-      break;
-
-    case RESETTING_STATE:
-      Particle.publish("State","Resetting in 30sec");
+      if (!waiting)
+      {
+        waiting = true;
+        resetWaitTimeStamp = millis();
+        Particle.publish("State","Resetting in 30 sec");
+      }
       if (millis() >= (resetWaitTimeStamp + resetWaitTime)) System.reset();
       break;
   }
-  NonBlockingDelay(1000);
 }
 
 void turnOnWater(unsigned long duration)                  // Where we water the plants - critical function completes
@@ -297,7 +302,7 @@ int takeMeasurements(String command)
 {
   if (command == "1")                                   // Default - enabled
   {
-    state = SENSOR_DATA_STATE;
+    state = SENSING_STATE;
     return 1;
   }
   else return 0;                                              // Never get here but if we do, let's be safe and disable
