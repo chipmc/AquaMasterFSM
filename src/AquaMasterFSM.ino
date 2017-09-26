@@ -134,7 +134,6 @@ void setup() {
 
 
 void loop() {
-
   switch(state) {
     case IDLE_STATE:
       if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
@@ -149,9 +148,11 @@ void loop() {
     case SENSING_STATE:
       getWiFiStrength();                                    // Get the WiFi Signal strength
       soilTemp = int(sensor.getTemperature()/(float)10);    // Get the Soil temperature
+      while(sensor.isBusy());             // Wait to make sure sensor is ready.
       if (!getMoisture())                 // Test soil Moisture - if valid then proceed
       {
         state = ERROR_STATE;
+        Particle.publish("Sensor","Error");
         break;
       }
       Particle.publish("weatherU_hook");                    // Get the weather forcast
@@ -177,7 +178,7 @@ void loop() {
           strcpy(wateringContext,"Not Enabled");
           break;
         }
-        else if (currentPeriod < startWaterHour && currentPeriod > stopWaterHour)
+        else if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
         {
           strcpy(wateringContext,"Not Time");
           break;
@@ -192,7 +193,8 @@ void loop() {
           strcpy(wateringContext,"Not Needed");
           break;
         }
-        if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
+        // If you get to here - Watering is enabled, it is time, no heavy rain expected and the soil is dry - so let's water
+        else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
         else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
         strcpy(wateringContext,"Watering");
         digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
