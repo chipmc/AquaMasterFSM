@@ -31,6 +31,7 @@
 */
 
 STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high speed between antennas
+STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
@@ -52,12 +53,14 @@ const int flowPin = A2;                     // Where the flow meter pulse comes 
 // Timing Variables
 unsigned long publishTimeStamp = 0;         // Keep track of when we publish a webhook
 unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
-unsigned long webhookWaitTime = 10000;      // How long will we let a webhook go before we give up
+unsigned long webhookWaitTime = 45000;      // How long will we let a webhook go before we give up
 unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
 bool waiting = false;
 int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
 int lastWateredDayAddr = 4;
+int resetCountAddr = 8;
+int resetCount = 0;
 int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
 int lastWateredPeriod = 0;                  // So we only wanter once an hour
 int lastWateredDay = 0;                     // Need to reset the last watered period each day
@@ -122,8 +125,14 @@ void setup() {
   Time.zone(-4);                            // Raleigh DST (watering is for the summer)
 
   Wire.begin();                             // Begin to initialize the libraries and devices
-  Serial.begin(9600);
-  sensor.begin(true);                           // reset the Chrip sensor
+  sensor.begin(true);                       // reset the Chirp sensor
+
+  resetCount = EEPROM.get(resetCountAddr,resetCount);       // Retrive system recount data from FRAMwrite8
+  if (System.resetReason() == RESET_REASON_PIN_RESET)  // Check to see if we are starting from a pin reset
+  {
+    resetCount++;
+    EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+  }
 
   EEPROM.get(lastWateredPeriodAddr,lastWateredPeriod);    // Load the last watered period from EEPROM
   EEPROM.get(lastWateredDayAddr,lastWateredDay);          // Load the last watered day from EEPROM
@@ -136,6 +145,11 @@ void setup() {
 void loop() {
   switch(state) {
     case IDLE_STATE:
+      if (Time.day() != currentDay)
+      {
+        resetCount = 0;
+        EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+      }
       if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
       {
         currentPeriod = Time.hour();                          // Set the new current period
@@ -243,9 +257,19 @@ void loop() {
     case ERROR_STATE:                               // Set up so I could have other error recovery options than just reset in the future
       if (!waiting)
       {
-        waiting = true;
-        resetWaitTimeStamp = millis();
-        Particle.publish("State","Resetting in 30 sec");
+        if (resetCount > 3)
+        {
+          resetCount = 0;
+          EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+          currentPeriod = Time.hour();  // Let's wait an hour to report again.
+          Particle.publish("State","Excess Resets - 1 hour break");
+          state =IDLE_STATE;
+        }
+        else {
+          waiting = true;
+          resetWaitTimeStamp = millis();
+          Particle.publish("State","Resetting in 30 sec");
+        }
       }
       if (millis() >= (resetWaitTimeStamp + resetWaitTime)) System.reset();
       break;
@@ -261,6 +285,9 @@ void sendToUbidots()                                      // Houly update to Ubi
   char data[256];                                         // Store the date in this character array - not global
   snprintf(data, sizeof(data), "{\"Moisture\":%i, \"Watering\":%i, \"key1\":\"%s\", \"SoilTemp\":%i}",capValue, wateringMinutes, wateringContext, soilTemp);
   Particle.publish("AquaMaster_hook", data , PRIVATE);
+  //delay(3000);
+  //Particle.publish("Azure-IOT", data, PRIVATE);  // Let's try this!
+  //delay(3000);
 }
 
 int startStop(String command)                             // So we can manually turn on the water for testing and setup
@@ -357,7 +384,6 @@ void weatherHandler(const char *event, const char *data)  // Extracts the expect
   forecastDay = atoi(strtok(strBuffer, "\"~"));       // Use the delimiter to find today's date and expected Rainfall
   expectedRainfallToday = atof(strtok(NULL, "~"));
   snprintf(Rainfall,sizeof(Rainfall),"%4.2f",expectedRainfallToday);
-  Particle.publish("Rainfall",Rainfall);
 }
 
 void AquaMasterHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
