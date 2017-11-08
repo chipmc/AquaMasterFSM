@@ -238,6 +238,7 @@ void loop() {
     case REPORTING_STATE:
       if (!waiting)
       {
+        delay(300000);    // Suspect this device is screwing up the reporting from the others - 5 min delay
         publishTimeStamp = millis();
         waiting = true;
         sendToUbidots();
