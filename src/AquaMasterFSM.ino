@@ -2,7 +2,7 @@
  * Project AquaMaster - FSM Approach
  * Description: Watering program for the back deck
  * Author: Chip McClelland
- * Date: 9/13/17
+ * Date: 5/8/2018
 
  Wiring for Chirp (Board/Assign/Cable) - Red/Vcc/Orange, Black/GND/Green, Blue/SCL/Green&White, Yellow/SDA/Orange&White
 
@@ -30,12 +30,13 @@
 
 */
 
-STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high speed between antennas
+//STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high speed between antennas
+STARTUP(WiFi.selectAntenna(ANT_INTERNAL));      // continually switches at high speed between antennas
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.2"
+#define SOFTWARERELEASENUMBER "0.25"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -44,9 +45,9 @@ SYSTEM_THREAD(ENABLED);
 I2CSoilMoistureSensor sensor;               // For the Chirp sensor
 
 // Constants for Pins
-const int solenoidPin = D6;                 // Pin that controls the MOSFET that turn on the water
-const int blueLED = D7;                     // Used for debugging, can see when water is ON
-const int donePin = D2;                     // Pin the Electron uses to "pet" the watchdog
+const int solenoidPin = D2;                 // Pin that controls the MOSFET that turn on the water
+const int solenoidPin2 = D7;                     // Used for debugging, can see when water is ON
+const int donePin = D6;                     // Pin the Electron uses to "pet" the watchdog
 const int wakeUpPin = A7;                   // This is the Particle Electron WKP pin
 const int flowPin = A2;                     // Where the flow meter pulse comes in
 
@@ -56,15 +57,18 @@ unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
 unsigned long webhookWaitTime = 45000;      // How long will we let a webhook go before we give up
 unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
+unsigned long lastPublish;
 bool waiting = false;
 int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
 int lastWateredDayAddr = 4;
 int resetCountAddr = 8;
+int timeZoneAddr = 12;
 int resetCount = 0;
 int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
 int lastWateredPeriod = 0;                  // So we only wanter once an hour
 int lastWateredDay = 0;                     // Need to reset the last watered period each day
 int currentDay = 0;                         // Updated so we can tell which day we last watered
+
 
 // Watering Variables
 int shortWaterMinutes = 1;                  // Short watering cycle
@@ -94,7 +98,7 @@ char wateringContext[25];                   // Why did we water or not sent to U
 float rainThreshold = 0.4;                  // Expected rainfall in inches which would cause us not to water
 
 // State Maching Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SENSING_STATE, FORECAST_WAIT_STATE, WATERING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SENSING_STATE, SCHEDULING_STATE, FORECASTING_STATE, WATERING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
 State state = INITIALIZATION_STATE;
 
 void setup() {
@@ -102,8 +106,8 @@ void setup() {
   digitalWrite(donePin, HIGH);              // Pet now while we are getting set up
   digitalWrite(donePin, LOW);
   pinMode(solenoidPin,OUTPUT);              // Pin to turn on the water
+  pinMode(solenoidPin2,OUTPUT);              // Pin to turn on the water
   digitalWrite(solenoidPin, LOW);           // Make sure it is off
-  pinMode(blueLED,OUTPUT);                  // Pin to see whether water should be on
   pinMode(wakeUpPin,INPUT_PULLDOWN);        // The signal from the watchdog is active HIGH
   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
 
@@ -113,21 +117,25 @@ void setup() {
   Particle.variable("Release",releaseNumber);
   Particle.variable("LastWater",lastWateredPeriod);
   Particle.variable("RainFcst", Rainfall);
-  Particle.function("start-stop", startStop);       // Here are thre functions for easy control
+  Particle.function("start-stop", startStop);       // Here are the functions for easy control
   Particle.function("Enabled", wateringEnabled);    // I can disable watering simply here
   Particle.function("Measure", takeMeasurements);   // If we want to see Temp / Moisture values updated
+  Particle.function("Set-Timezone",setTimeZone);
+  Particle.function("Set-Verbose",setVerboseMode);
+
   char responseTopic[125];
   String deviceID = System.deviceID();
   deviceID.toCharArray(responseTopic,125);
   Particle.subscribe(responseTopic, AquaMasterHandler, MY_DEVICES);       // Subscribe to the integration response event
   Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
 
-  Time.zone(-4);                            // Raleigh DST (watering is for the summer)
+  int8_t tempTimeZoneOffset = EEPROM.get(timeZoneAddr,tempTimeZoneOffset);                  // Load Time zone data from EEPROM
+  if (tempTimeZoneOffset > -12 && tempTimeZoneOffset < 12) Time.zone((float)tempTimeZoneOffset);
+  else Time.zone(-4);                             // Default if no valid number stored - Raleigh DST (watering is for the summer)
 
-  Wire.begin();                             // Begin to initialize the libraries and devices
   sensor.begin(true);                       // reset the Chirp sensor
 
-  resetCount = EEPROM.get(resetCountAddr,resetCount);       // Retrive system recount data from FRAMwrite8
+  EEPROM.get(resetCountAddr,resetCount);       // Retrive system recount data from EEPROM
   if (System.resetReason() == RESET_REASON_PIN_RESET)  // Check to see if we are starting from a pin reset
   {
     resetCount++;
@@ -138,7 +146,8 @@ void setup() {
   EEPROM.get(lastWateredDayAddr,lastWateredDay);          // Load the last watered day from EEPROM
 
   if (sensor.getAddress() == 32) state = IDLE_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
-  else state = ERROR_STATE;
+  //else state = ERROR_STATE;
+  else state = IDLE_STATE;
 }
 
 
@@ -169,60 +178,67 @@ void loop() {
         Particle.publish("Sensor","Error");
         break;
       }
-      Particle.publish("weatherU_hook");                    // Get the weather forcast
-      publishTimeStamp = millis();                          // So we can know how long to wait
-      forecastDay = 0;                                      // So we know when we get an updated forecast
-      state = FORECAST_WAIT_STATE;
+      else if((strncmp(Moisture,"Wet",3) == 0) || (strncmp(Moisture,"Very Wet",8) == 0) || (strncmp(Moisture,"Waterlogged",11) == 0))
+      {
+        strcpy(wateringContext,"Not Needed");
+        state = REPORTING_STATE;
+      }
+      else
+      {
+        Particle.publish("weatherU_hook");                    // Get the weather forcast
+        publishTimeStamp = millis();                          // So we can know how long to wait
+        forecastDay = expectedRainfallToday = 0;              // So we know when we get an updated forecast
+        state = SCHEDULING_STATE;
+      }
       break;
 
-    case FORECAST_WAIT_STATE:
+    case SCHEDULING_STATE:
+      state = FORECASTING_STATE;
+      if (!waterEnabled)
+      {
+        strcpy(wateringContext,"Not Enabled");
+        state = REPORTING_STATE;
+      }
+      else if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
+      {
+        strcpy(wateringContext,"Not Time");
+        state = REPORTING_STATE;
+      }
+      else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
+      else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
+      break;
+
+
+    case FORECASTING_STATE:
       if ((millis() >= (publishTimeStamp + webhookWaitTime)) || forecastDay)
       {
         state = WATERING_STATE;
+        if (expectedRainfallToday > rainThreshold)
+        {
+          strcpy(wateringContext,"Heavy Rain Expected");
+          state = REPORTING_STATE;
+        }
       }
       break;
 
     case WATERING_STATE:
       if (!watering)
       {
-        state = REPORTING_STATE;
         wateringMinutes = 0;
-        if (!waterEnabled)
-        {
-          strcpy(wateringContext,"Not Enabled");
-          break;
-        }
-        else if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
-        {
-          strcpy(wateringContext,"Not Time");
-          break;
-        }
-        else if (expectedRainfallToday > rainThreshold)
-        {
-          strcpy(wateringContext,"Heavy Rain Expected");
-          break;
-        }
-        else if ((strncmp(Moisture,"Wet",3) == 0) || (strncmp(Moisture,"Very Wet",8) == 0) || (strncmp(Moisture,"Waterlogged",11) == 0))
-        {
-          strcpy(wateringContext,"Not Needed");
-          break;
-        }
         // If you get to here - Watering is enabled, it is time, no heavy rain expected and the soil is dry - so let's water
-        else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
-        else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
         strcpy(wateringContext,"Watering");
         digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
         digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
         doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
-        digitalWrite(blueLED, HIGH);                            // Light on for watering
         digitalWrite(solenoidPin, HIGH);                        // Turn on the water
+        digitalWrite(solenoidPin2,HIGH);
         watering = true;
         wateringStarted = millis();
       }
       if (watering && (millis() >= (wateringStarted + wateringMinutes*oneMinuteMillis)))
       {
-        digitalWrite(blueLED, LOW);                             // Turn everything off
         digitalWrite(solenoidPin, LOW);
+        digitalWrite(solenoidPin2,LOW);
         watering = false;
         doneEnabled = true;                                     // Successful response - can pet the dog again
         digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
@@ -238,9 +254,9 @@ void loop() {
     case REPORTING_STATE:
       if (!waiting)
       {
-        delay(300000);    // Suspect this device is screwing up the reporting from the others - 5 min delay
         publishTimeStamp = millis();
-        waiting = true;
+        waiting = true;                                         // Make sure we set the flag for flow through this case
+        doneEnabled = false;                                    // If we get a valid response from Ubidots, this will be set back true
         sendToUbidots();
       }
       else if (waiting && doneEnabled)
@@ -302,7 +318,6 @@ int startStop(String command)                             // So we can manually 
   }
   else if (command == "0")                                // This allows us to turn off the water at any time
   {
-    digitalWrite(blueLED, LOW);                           // Turn off light
     digitalWrite(solenoidPin, LOW);                       // Turn off water
     return 1;
   }
@@ -352,7 +367,7 @@ int getMoisture()                                        // Here we get the soil
   if ((capValue <= 400) || (capValue >= 520))
   {
     sprintf(Moisture, "Out of Range: %d", capValue);
-    return 0;   // Quick check for a valid value
+    //return 0;   // Quick check for a valid value
   }
   int strength = map(capValue, 400, 520, 0, 5);           // Map - these values to cases that will use words that are easier to understand
   sprintf(Moisture, "%s: %d", capDescription[strength], capValue);
@@ -412,4 +427,56 @@ void watchdogISR()                                        // Will pet the dog ..
     digitalWrite(donePin, HIGH);                          // This is all you need to do to pet the dog low to high transition
     digitalWrite(donePin, LOW);
   }
+}
+
+int setTimeZone(String command)
+{
+  char * pEND;
+  char data[256];
+  int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
+  if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  Time.zone((float)tempTimeZoneOffset);
+  EEPROM.put(timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in EEPROM
+  time_t t = Time.now();
+  snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
+  waitUntil(meterParticlePublish);
+  Particle.publish("Time",data);
+  lastPublish = millis();
+  waitUntil(meterParticlePublish);
+  Particle.publish("Time",Time.timeStr(t));
+  lastPublish = millis();
+  return 1;
+}
+
+int setVerboseMode(String command) // Function to force sending data in current hour
+{
+  if (command == "1")
+  {
+    verboseMode = true;
+    FRAMread8(CONTROLREGISTER);
+    controlRegister = (0b00001000 | controlRegister);                    // Turn on verboseMode
+    FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
+    waitUntil(meterParticlePublish);
+    Particle.publish("Mode","Set Verbose Mode");
+    lastPublish = millis();
+    return 1;
+  }
+  else if (command == "0")
+  {
+    verboseMode = false;
+    FRAMread8(CONTROLREGISTER);
+    controlRegister = (0b11110111 & controlRegister);                    // Turn off verboseMode
+    FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
+    waitUntil(meterParticlePublish);
+    Particle.publish("Mode","Cleared Verbose Mode");
+    lastPublish = millis();
+    return 1;
+  }
+  else return 0;
+}
+
+bool meterParticlePublish(void)
+{
+  if(millis() - lastPublish >= publishFrequency) return 1;
+  else return 0;
 }
