@@ -118,6 +118,7 @@ void setup() {
   pinMode(solenoidPin,OUTPUT);              // Pin to turn on the water
   pinMode(solenoidPin2,OUTPUT);              // Pin to turn on the water
   digitalWrite(solenoidPin, LOW);           // Make sure it is off
+  digitalWrite(solenoidPin2, LOW);           // Make sure it is off
   pinMode(wakeUpPin,INPUT_PULLDOWN);        // The signal from the watchdog is active HIGH
   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
 
@@ -238,16 +239,16 @@ void loop() {
     case SCHEDULING_STATE:
       waitUntil(meterParticlePublish);
       state = FORECASTING_STATE;
-      if (!waterEnabled)
-      {
-        strcpy(wateringContext,"Not Enabled");
-        if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
-        state = REPORTING_STATE;
-      }
-      else if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
+      if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
       {
         strcpy(wateringContext,"Not Time");
         if(verboseMode) Particle.publish("State","Reporting - Not Time");
+        state = REPORTING_STATE;
+      }
+      else if (!waterEnabled)
+      {
+        strcpy(wateringContext,"Not Enabled");
+        if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
         state = REPORTING_STATE;
       }
       else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
