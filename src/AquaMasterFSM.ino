@@ -1,5 +1,5 @@
 /*
- * Project AquaMaster - FSM Approach
+ * Project AquaMaster - FSM Approach - V3 Hardware
  * Description: Watering program for the back deck
  * Author: Chip McClelland
  * Date: 5/8/2018
@@ -16,27 +16,31 @@
  }
  [*] --> Initializing
  Initializing: 10 seconds
- Initializing -Down-> Idle: Success
- Initializing -Down-> Error: Failure
+ Initializing --> Idle: Success
+ Initializing --> Error: Failure
  Idle --> Sensing: New Hour
- Sensing --> AwaitingForecast: Valid Data
- Sensing -Left-> Error: Bad Data
- AwaitingForecast -Left-> Watering: Done Waiting
- Watering -Up-> Reporting: Watering Complete
- Reporting -Up-> AwaitingReceipt: Report Sent
- AwaitingReceipt -Right-> Idle: Reprting Complete
- AwaitingReceipt -Right-> Error: Bad Report
- @enduml
+ Sensing --> CheckingSchedule: Needs Water
+ Sensing --> Reporting: No Watering Required
+ Sensing --> Error: Bad Data
+ CheckingSchedule -->Reporting:Not Time or Not Enabled
+ CheckingSchedule --> Forecasting:Wantering Time & Enabled
+ Forecasting --> Watering: Watering Required
+ Forecasting --> Reporting: Rain Forecasted
+ Watering --> Reporting: Watering Complete
+ Reporting --> AwaitingReceipt: Report Sent
+ AwaitingReceipt --> Idle: Reprting Complete
+ AwaitingReceipt --> Error: Bad Report
+@enduml
 
 */
 
-//STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // continually switches at high speed between antennas
-STARTUP(WiFi.selectAntenna(ANT_INTERNAL));      // continually switches at high speed between antennas
+STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // Use this line to enable the external WiFi Antenna
+//STARTUP(WiFi.selectAntenna(ANT_INTERNAL));    // Use this line to enable the external WiFi Antenna
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.55"
+#define SOFTWARERELEASENUMBER "0.56"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -46,7 +50,7 @@ I2CSoilMoistureSensor sensor;               // For the Chirp sensor
 
 // Constants for Pins
 const int solenoidPin = D2;                 // Pin that controls the MOSFET that turn on the water
-const int solenoidPin2 = D7;                     // Used for debugging, can see when water is ON
+const int solenoidPin2 = D7;                // Used for debugging, can see when water is ON
 const int donePin = D6;                     // Pin the Electron uses to "pet" the watchdog
 const int wakeUpPin = A7;                   // This is the Particle Electron WKP pin
 const int flowPin = A2;                     // Where the flow meter pulse comes in
@@ -57,8 +61,8 @@ unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
 unsigned long webhookWaitTime = 45000;      // How long will we let a webhook go before we give up
 unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
-unsigned long publishFrequency = 1000;          // How often can we publish to Particle
-unsigned long lastPublish;
+unsigned long publishFrequency = 1000;      // How often can we publish to Particle
+unsigned long lastPublish;                  // Keeps track of the last publish - meters messages to Particle
 
 // EEPROM Memory Map
 int controlRegisterAddr = 0;                // First Byte - Control Register
@@ -69,24 +73,23 @@ int resetCountAddr = 3;                     // Fourth Byte - Reset count
 int timeZoneAddr = 4;                       // Fifth Byte (signed) - Time zone
 
 // Control Variables
-bool waiting = false;
-byte controlRegister;                               // Stores the control register values
-bool verboseMode;
-byte resetCount;
-byte currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
-byte lastWateredPeriod = 0;                  // So we only wanter once an hour
-byte lastWateredDay = 0;                     // Need to reset the last watered period each day
-byte currentDay = 0;                         // Updated so we can tell which day we last watered
-
+bool waiting = false;                       // Keeps track of events which we need to wait to perform - like a reset
+byte controlRegister;                       // Stores the control register values
+bool verboseMode;                           // More chatty communciations with Particle to help in debugging - in controlRegister
+byte resetCount;                            // Too many resets are bad, this keeps track
+byte currentPeriod = 0;                     // Change length of period for testing 2 places in main loop
+byte lastWateredPeriod = 0;                 // So we only wanter once an hour
+byte lastWateredDay = 0;                    // Need to reset the last watered period each day
+byte currentDay = 0;                        // Updated so we can tell which day we last watered
 
 // Watering Variables
 int shortWaterMinutes = 1;                  // Short watering cycle
 int longWaterMinutes = 5;                   // Long watering cycle - must be shorter than watchdog interval!
 int wateringMinutes = 0;                    // How long will we water based on time or Moisture
-int startWaterHour = 5;                     // When can we start watering
-int stopWaterHour = 12;                     // When do we stop for the day
+int startWaterHour = 5;                     // When can we start watering (24 hrs - local based on TimeZone)
+int stopWaterHour = 8;                      // When do we stop for the day
 bool watering = false;                      // Status - watering?
-bool waterEnabled = 1;                       // Allows you to disable watering from the app or Ubidots
+bool waterEnabled;                          // Allows you to disable watering from the app or Ubidots - in controlRegister
 float expectedRainfallToday = 0;            // From Weather Underground Simple Forecast qpf_allday
 int forecastDay = 0;                        // So we can know when we get a response from Weather Underground
 unsigned long wateringStarted = 0;
@@ -163,8 +166,7 @@ void setup() {
   lastWateredDay = EEPROM.read(lastWateredDayAddr);          // Load the last watered day from EEPROM
 
   if (sensor.getAddress() == 32) state = SENSING_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
-  //else state = ERROR_STATE;
-  else state = SENSING_STATE;
+  else state = ERROR_STATE;
   if (verboseMode) {
     waitUntil(meterParticlePublish);
     Particle.publish("State","Idle");
@@ -185,14 +187,11 @@ void loop() {
       {
         currentPeriod = Time.hour();                          // Set the new current period
         currentDay = Time.day();                              // Sets the current Day
-        // This next line protects against a reboot causing rewatering in same period
-        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) {
-          state = SENSING_STATE;
-          if (verboseMode) {
-            waitUntil(meterParticlePublish);
-            Particle.publish("State","Sensing");
-            lastPublish = millis();
-          }
+        state = SENSING_STATE;
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Sensing");
+          lastPublish = millis();
         }
       }
       break;
@@ -238,14 +237,21 @@ void loop() {
     case SCHEDULING_STATE:
       waitUntil(meterParticlePublish);
       state = FORECASTING_STATE;
-      if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
+      if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)  // Outside watering window
       {
         strcpy(wateringContext,"Not Time");
         if(verboseMode) Particle.publish("State","Reporting - Not Time");
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
-      else if (!waterEnabled)
+      else if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay)  // protects against a reboot causing rewatering in same period
+      {
+        strcpy(wateringContext,"Already Watered This Period");
+        if(verboseMode) Particle.publish("State","Reporting - Already Watered");
+        wateringMinutes = 0;
+        state = REPORTING_STATE;
+      }
+      else if (!waterEnabled) // Check to ensure watering is Enabled
       {
         strcpy(wateringContext,"Not Enabled");
         if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
