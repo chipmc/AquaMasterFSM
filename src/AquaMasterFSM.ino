@@ -36,7 +36,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.25"
+#define SOFTWARERELEASENUMBER "0.50"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -57,17 +57,26 @@ unsigned long resetWaitTimeStamp = 0;       // Starts the reset wait clock
 unsigned long webhookWaitTime = 45000;      // How long will we let a webhook go before we give up
 unsigned long resetWaitTime = 30000;        // Will wait this lonk before resetting.
 unsigned long oneMinuteMillis = 60000;      // For Testing the system and smaller adjustments
+unsigned long publishFrequency = 1000;          // How often can we publish to Particle
 unsigned long lastPublish;
+
+// EEPROM Memory Map
+int controlRegisterAddr = 0;                // First Byte - Control Register
+                                            // Control Register (7-2 Open, 1 - Enabled, 0 - Verbose Mode)
+int lastWateredPeriodAddr = 1;              // Sesond Byte - Last Watered Period (hour)
+int lastWateredDayAddr = 2;                 // Third Byte - Last Watered Day
+int resetCountAddr = 3;                     // Fourth Byte - Reset count
+int timeZoneAddr = 4;                       // Fifth Byte (signed) - Time zone
+
+// Control Variables
 bool waiting = false;
-int lastWateredPeriodAddr = 0;              // Where I store the last watered period in EEPROM
-int lastWateredDayAddr = 4;
-int resetCountAddr = 8;
-int timeZoneAddr = 12;
-int resetCount = 0;
-int currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
-int lastWateredPeriod = 0;                  // So we only wanter once an hour
-int lastWateredDay = 0;                     // Need to reset the last watered period each day
-int currentDay = 0;                         // Updated so we can tell which day we last watered
+byte controlRegister;                               // Stores the control register values
+bool verboseMode;
+byte resetCount;
+byte currentPeriod = 0;                      // Change length of period for testing 2 places in main loop
+byte lastWateredPeriod = 0;                  // So we only wanter once an hour
+byte lastWateredDay = 0;                     // Need to reset the last watered period each day
+byte currentDay = 0;                         // Updated so we can tell which day we last watered
 
 
 // Watering Variables
@@ -77,7 +86,7 @@ int wateringMinutes = 0;                    // How long will we water based on t
 int startWaterHour = 5;                     // When can we start watering
 int stopWaterHour = 8;                      // When do we stop for the day
 bool watering = false;                   // Status - watering?
-int waterEnabled = 1;                       // Allows you to disable watering from the app or Ubidots
+bool waterEnabled = 1;                       // Allows you to disable watering from the app or Ubidots
 float expectedRainfallToday = 0;            // From Weather Underground Simple Forecast qpf_allday
 int forecastDay = 0;                        // So we can know when we get a response from Weather Underground
 unsigned long wateringStarted = 0;
@@ -101,6 +110,7 @@ float rainThreshold = 0.4;                  // Expected rainfall in inches which
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SENSING_STATE, SCHEDULING_STATE, FORECASTING_STATE, WATERING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
 State state = INITIALIZATION_STATE;
 
+
 void setup() {
   pinMode(donePin,OUTPUT);                  // Allows us to pet the watchdog
   digitalWrite(donePin, HIGH);              // Pet now while we are getting set up
@@ -110,6 +120,7 @@ void setup() {
   digitalWrite(solenoidPin, LOW);           // Make sure it is off
   pinMode(wakeUpPin,INPUT_PULLDOWN);        // The signal from the watchdog is active HIGH
   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
+
 
   Particle.variable("WiFiStrength", Signal);      // These variables are used to monitor the device will reduce them over time
   Particle.variable("Moisture", Moisture);
@@ -123,31 +134,42 @@ void setup() {
   Particle.function("Set-Timezone",setTimeZone);
   Particle.function("Set-Verbose",setVerboseMode);
 
+
+  Wire.begin();
+  sensor.begin(true);                       // reset the Chirp sensor
+
   char responseTopic[125];
   String deviceID = System.deviceID();
   deviceID.toCharArray(responseTopic,125);
   Particle.subscribe(responseTopic, AquaMasterHandler, MY_DEVICES);       // Subscribe to the integration response event
   Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
 
-  int8_t tempTimeZoneOffset = EEPROM.get(timeZoneAddr,tempTimeZoneOffset);                  // Load Time zone data from EEPROM
+  int8_t tempTimeZoneOffset = EEPROM.read(timeZoneAddr);                  // Load Time zone data from EEPROM
   if (tempTimeZoneOffset > -12 && tempTimeZoneOffset < 12) Time.zone((float)tempTimeZoneOffset);
   else Time.zone(-4);                             // Default if no valid number stored - Raleigh DST (watering is for the summer)
 
-  sensor.begin(true);                       // reset the Chirp sensor
 
-  EEPROM.get(resetCountAddr,resetCount);       // Retrive system recount data from EEPROM
+  resetCount = EEPROM.read(resetCountAddr);       // Retrive system recount data from EEPROM
   if (System.resetReason() == RESET_REASON_PIN_RESET)  // Check to see if we are starting from a pin reset
   {
     resetCount++;
-    EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+    EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
   }
 
-  EEPROM.get(lastWateredPeriodAddr,lastWateredPeriod);    // Load the last watered period from EEPROM
-  EEPROM.get(lastWateredDayAddr,lastWateredDay);          // Load the last watered day from EEPROM
+  controlRegister = EEPROM.read(controlRegisterAddr);
+  verboseMode = controlRegister  & 0b00000001;
+  waterEnabled = controlRegister & 0b00000010;
+  lastWateredPeriod = EEPROM.read(lastWateredPeriodAddr);    // Load the last watered period from EEPROM
+  lastWateredDay = EEPROM.read(lastWateredDayAddr);          // Load the last watered day from EEPROM
 
   if (sensor.getAddress() == 32) state = IDLE_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
   //else state = ERROR_STATE;
   else state = IDLE_STATE;
+  if (verboseMode) {
+    waitUntil(meterParticlePublish);
+    Particle.publish("State","Idle");
+    lastPublish = millis();
+  }
 }
 
 
@@ -157,14 +179,21 @@ void loop() {
       if (Time.day() != currentDay)
       {
         resetCount = 0;
-        EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+        EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
       }
       if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
       {
         currentPeriod = Time.hour();                          // Set the new current period
         currentDay = Time.day();                              // Sets the current Day
         // This next line protects against a reboot causing rewatering in same period
-        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) state = SENSING_STATE;
+        if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay) {
+          state = SENSING_STATE;
+          if (verboseMode) {
+            waitUntil(meterParticlePublish);
+            Particle.publish("State","Sensing");
+            lastPublish = millis();
+          }
+        }
       }
       break;
 
@@ -175,12 +204,21 @@ void loop() {
       if (!getMoisture())                 // Test soil Moisture - if valid then proceed
       {
         state = ERROR_STATE;
-        Particle.publish("Sensor","Error");
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Error - getMoisture Failed");
+          lastPublish = millis();
+        }
         break;
       }
       else if((strncmp(Moisture,"Wet",3) == 0) || (strncmp(Moisture,"Very Wet",8) == 0) || (strncmp(Moisture,"Waterlogged",11) == 0))
       {
         strcpy(wateringContext,"Not Needed");
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Reporting - Too Wet");
+          lastPublish = millis();
+        }
         state = REPORTING_STATE;
       }
       else
@@ -188,24 +226,34 @@ void loop() {
         Particle.publish("weatherU_hook");                    // Get the weather forcast
         publishTimeStamp = millis();                          // So we can know how long to wait
         forecastDay = expectedRainfallToday = 0;              // So we know when we get an updated forecast
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Scheduling");
+          lastPublish = millis();
+        }
         state = SCHEDULING_STATE;
       }
       break;
 
     case SCHEDULING_STATE:
+      waitUntil(meterParticlePublish);
       state = FORECASTING_STATE;
       if (!waterEnabled)
       {
         strcpy(wateringContext,"Not Enabled");
+        if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
         state = REPORTING_STATE;
       }
       else if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)
       {
         strcpy(wateringContext,"Not Time");
+        if(verboseMode) Particle.publish("State","Reporting - Not Time");
         state = REPORTING_STATE;
       }
       else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
       else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
+      if(verboseMode && state == FORECASTING_STATE) Particle.publish("State","Forecasting");
+      lastPublish = millis();
       break;
 
 
@@ -213,11 +261,22 @@ void loop() {
       if ((millis() >= (publishTimeStamp + webhookWaitTime)) || forecastDay)
       {
         state = WATERING_STATE;
+
         if (expectedRainfallToday > rainThreshold)
         {
           strcpy(wateringContext,"Heavy Rain Expected");
+          if (verboseMode) {
+            waitUntil(meterParticlePublish);
+            Particle.publish("State","Reporting - Rain Forecast");
+            lastPublish = millis();
+          }
           state = REPORTING_STATE;
         }
+      }
+      if (verboseMode && state == WATERING_STATE) {
+        waitUntil(meterParticlePublish);
+        Particle.publish("State","Watering");
+        lastPublish = millis();
       }
       break;
 
@@ -227,6 +286,11 @@ void loop() {
         wateringMinutes = 0;
         // If you get to here - Watering is enabled, it is time, no heavy rain expected and the soil is dry - so let's water
         strcpy(wateringContext,"Watering");
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Started Watering");
+          lastPublish = millis();
+        }
         digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
         digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
         doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
@@ -245,9 +309,14 @@ void loop() {
         digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
         lastWateredDay = currentDay;
         lastWateredPeriod = currentPeriod;
-        EEPROM.put(lastWateredPeriodAddr,currentPeriod);        // Sets the last watered period to the current one
-        EEPROM.put(lastWateredDayAddr,currentDay);              // Stored in EEPROM since this issue only comes in case of a reset
+        EEPROM.write(lastWateredPeriodAddr,currentPeriod);        // Sets the last watered period to the current one
+        EEPROM.write(lastWateredDayAddr,currentDay);              // Stored in EEPROM since this issue only comes in case of a reset
         state = REPORTING_STATE;                                  // If this fails, the watchdog will reset
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Reporting - Done Watering");
+          lastPublish = millis();
+        }
       }
       break;
 
@@ -261,12 +330,22 @@ void loop() {
       }
       else if (waiting && doneEnabled)
       {
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Idle");
+          lastPublish = millis();
+        }
         state = IDLE_STATE;       // This is how we know if Ubidots got the data
         waiting = false;
       }
       else if (waiting && millis() >= (publishTimeStamp + webhookWaitTime))
       {
         state = ERROR_STATE;
+        if (verboseMode) {
+          waitUntil(meterParticlePublish);
+          Particle.publish("State","Error - Reporting Timed Out");
+          lastPublish = millis();
+        }
         waiting = false;
       }
       break;
@@ -277,21 +356,30 @@ void loop() {
         if (resetCount > 3)
         {
           resetCount = 0;
-          EEPROM.put(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
+          EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
           currentPeriod = Time.hour();  // Let's wait an hour to report again.
-          Particle.publish("State","Excess Resets - 1 hour break");
+          if (verboseMode) {
+            waitUntil(meterParticlePublish);
+            Particle.publish("State","Excess Resets - 1 hour break");
+            lastPublish = millis();
+          }
           state =IDLE_STATE;
         }
         else {
           waiting = true;
           resetWaitTimeStamp = millis();
-          Particle.publish("State","Resetting in 30 sec");
+          if (verboseMode) {
+            waitUntil(meterParticlePublish);
+            Particle.publish("State","Resetting in 30 sec");
+            lastPublish = millis();
+          }
         }
       }
       if (millis() >= (resetWaitTimeStamp + resetWaitTime)) System.reset();
       break;
   }
 }
+
 
 void sendToUbidots()                                      // Houly update to Ubidots for serial data logging and analysis
 {
@@ -302,9 +390,7 @@ void sendToUbidots()                                      // Houly update to Ubi
   char data[256];                                         // Store the date in this character array - not global
   snprintf(data, sizeof(data), "{\"Moisture\":%i, \"Watering\":%i, \"key1\":\"%s\", \"SoilTemp\":%i}",capValue, wateringMinutes, wateringContext, soilTemp);
   Particle.publish("AquaMaster_hook", data , PRIVATE);
-  //delay(3000);
-  //Particle.publish("Azure-IOT", data, PRIVATE);  // Let's try this!
-  //delay(3000);
+
 }
 
 int startStop(String command)                             // So we can manually turn on the water for testing and setup
@@ -391,8 +477,10 @@ void weatherHandler(const char *event, const char *data)  // Extracts the expect
   // Only look at the current day
   // JSON payload - http://api.wunderground.com/api/(my key)/forecast/q/nc/raleigh-durham.json
   // Response Template: "{{#forecast}}{{#simpleforecast}}{{#forecastday}}{{date.day}}~{{qpf_allday.in}}~{{/forecastday}}{{/simpleforecast}}{{/forecast}}"
-  if (!data) {                                            // First check to see if there is any data
+  if (!data && verboseMode) {                                            // First check to see if there is any data
+    waitUntil(meterParticlePublish);
     Particle.publish("Rainfall", "No Data");
+    lastPublish = millis();
     return;
   }
   char strBuffer[30] = "";                                // Create character array to hold response
@@ -405,19 +493,30 @@ void weatherHandler(const char *event, const char *data)  // Extracts the expect
 void AquaMasterHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
 {
   // Response Template: "{{watering.0.status_code}}"
-  if (!data) {                                            // First check to see if there is any data
+  if (!data && verboseMode) {                                            // First check to see if there is any data
+    waitUntil(meterParticlePublish);
     Particle.publish("AquaMaster", "No Data");
+    lastPublish = millis();
     return;
   }
   int responseCode = atoi(data);                          // Response is only a single number thanks to Template
   if ((responseCode == 200) || (responseCode == 201))
   {
-    Particle.publish("AquaMaster","Success");
+    if (verboseMode) {
+      waitUntil(meterParticlePublish);
+      Particle.publish("AquaMaster","Success");
+      lastPublish = millis();
+    }
     doneEnabled = true;                                   // Successful response - can pet the dog again
     digitalWrite(donePin, HIGH);                          // If an interrupt came in while petting disabled, we missed it so...
     digitalWrite(donePin, LOW);                           // will pet the dog just to be safe
   }
-  else Particle.publish("AquaMaster", data);             // Publish the response code
+  else if (verboseMode)
+  {
+    waitUntil(meterParticlePublish);
+    Particle.publish("AquaMaster", data);             // Publish the response code
+    lastPublish = millis();
+  }
 }
 
 void watchdogISR()                                        // Will pet the dog ... if petting is allowed
@@ -436,15 +535,17 @@ int setTimeZone(String command)
   int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
   if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0;   // Make sure it falls in a valid range or send a "fail" result
   Time.zone((float)tempTimeZoneOffset);
-  EEPROM.put(timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in EEPROM
+  EEPROM.write(timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in EEPROM
   time_t t = Time.now();
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
-  waitUntil(meterParticlePublish);
-  Particle.publish("Time",data);
-  lastPublish = millis();
-  waitUntil(meterParticlePublish);
-  Particle.publish("Time",Time.timeStr(t));
-  lastPublish = millis();
+  if (verboseMode) {
+    waitUntil(meterParticlePublish);
+    Particle.publish("Time",data);
+    lastPublish = millis();
+    waitUntil(meterParticlePublish);
+    Particle.publish("Time",Time.timeStr(t));
+    lastPublish = millis();
+  }
   return 1;
 }
 
@@ -453,9 +554,9 @@ int setVerboseMode(String command) // Function to force sending data in current 
   if (command == "1")
   {
     verboseMode = true;
-    FRAMread8(CONTROLREGISTER);
-    controlRegister = (0b00001000 | controlRegister);                    // Turn on verboseMode
-    FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
+    controlRegister = EEPROM.read(controlRegisterAddr);
+    controlRegister = (0b00000001 | controlRegister);                    // Turn on verboseMode
+    EEPROM.write(controlRegisterAddr,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
     Particle.publish("Mode","Set Verbose Mode");
     lastPublish = millis();
@@ -464,9 +565,9 @@ int setVerboseMode(String command) // Function to force sending data in current 
   else if (command == "0")
   {
     verboseMode = false;
-    FRAMread8(CONTROLREGISTER);
-    controlRegister = (0b11110111 & controlRegister);                    // Turn off verboseMode
-    FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
+    controlRegister = EEPROM.read(controlRegisterAddr);
+    controlRegister = (0b11111110 & controlRegister);                    // Turn off verboseMode
+    EEPROM.write(controlRegisterAddr,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
     Particle.publish("Mode","Cleared Verbose Mode");
     lastPublish = millis();
