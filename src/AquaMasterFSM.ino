@@ -36,7 +36,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.50"
+#define SOFTWARERELEASENUMBER "0.55"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -84,8 +84,8 @@ int shortWaterMinutes = 1;                  // Short watering cycle
 int longWaterMinutes = 5;                   // Long watering cycle - must be shorter than watchdog interval!
 int wateringMinutes = 0;                    // How long will we water based on time or Moisture
 int startWaterHour = 5;                     // When can we start watering
-int stopWaterHour = 8;                      // When do we stop for the day
-bool watering = false;                   // Status - watering?
+int stopWaterHour = 12;                     // When do we stop for the day
+bool watering = false;                      // Status - watering?
 bool waterEnabled = 1;                       // Allows you to disable watering from the app or Ubidots
 float expectedRainfallToday = 0;            // From Weather Underground Simple Forecast qpf_allday
 int forecastDay = 0;                        // So we can know when we get a response from Weather Underground
@@ -104,7 +104,7 @@ char Moisture[15];                          // Combines description and capValue
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 bool doneEnabled = true;           // This enables petting the watchdog
 char wateringContext[25];                   // Why did we water or not sent to Ubidots for context
-float rainThreshold = 0.4;                  // Expected rainfall in inches which would cause us not to water
+float rainThreshold = 0.45;                  // Expected rainfall in inches which would cause us not to water
 
 // State Maching Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SENSING_STATE, SCHEDULING_STATE, FORECASTING_STATE, WATERING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
@@ -149,7 +149,6 @@ void setup() {
   if (tempTimeZoneOffset > -12 && tempTimeZoneOffset < 12) Time.zone((float)tempTimeZoneOffset);
   else Time.zone(-4);                             // Default if no valid number stored - Raleigh DST (watering is for the summer)
 
-
   resetCount = EEPROM.read(resetCountAddr);       // Retrive system recount data from EEPROM
   if (System.resetReason() == RESET_REASON_PIN_RESET)  // Check to see if we are starting from a pin reset
   {
@@ -163,9 +162,9 @@ void setup() {
   lastWateredPeriod = EEPROM.read(lastWateredPeriodAddr);    // Load the last watered period from EEPROM
   lastWateredDay = EEPROM.read(lastWateredDayAddr);          // Load the last watered day from EEPROM
 
-  if (sensor.getAddress() == 32) state = IDLE_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
+  if (sensor.getAddress() == 32) state = SENSING_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
   //else state = ERROR_STATE;
-  else state = IDLE_STATE;
+  else state = SENSING_STATE;
   if (verboseMode) {
     waitUntil(meterParticlePublish);
     Particle.publish("State","Idle");
@@ -243,12 +242,14 @@ void loop() {
       {
         strcpy(wateringContext,"Not Time");
         if(verboseMode) Particle.publish("State","Reporting - Not Time");
+        wateringMinutes = 0;
         state = REPORTING_STATE;
       }
       else if (!waterEnabled)
       {
         strcpy(wateringContext,"Not Enabled");
         if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
+        wateringMinutes = 0;
         state = REPORTING_STATE;
       }
       else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
@@ -284,7 +285,6 @@ void loop() {
     case WATERING_STATE:
       if (!watering)
       {
-        wateringMinutes = 0;
         // If you get to here - Watering is enabled, it is time, no heavy rain expected and the soil is dry - so let's water
         strcpy(wateringContext,"Watering");
         if (verboseMode) {
@@ -300,7 +300,7 @@ void loop() {
         watering = true;
         wateringStarted = millis();
       }
-      if (watering && (millis() >= (wateringStarted + wateringMinutes*oneMinuteMillis)))
+      if (watering && millis() >= (wateringStarted + wateringMinutes * oneMinuteMillis))
       {
         digitalWrite(solenoidPin, LOW);
         digitalWrite(solenoidPin2,LOW);
@@ -400,12 +400,22 @@ int startStop(String command)                             // So we can manually 
   {
     wateringMinutes = shortWaterMinutes;                  // Manual waterings are short
     strcpy(wateringContext,"User Initiated");             // Add the right context for publishing
+    if (verboseMode) {
+      waitUntil(meterParticlePublish);
+      Particle.publish("State","Watering - User Initiated");
+      lastPublish = millis();
+    }
     state = WATERING_STATE;
     return 1;
   }
   else if (command == "0")                                // This allows us to turn off the water at any time
   {
-    digitalWrite(solenoidPin, LOW);                       // Turn off water
+    if (verboseMode) {
+      waitUntil(meterParticlePublish);
+      Particle.publish("State","Stopped Watering - User Initiated");
+      lastPublish = millis();
+    }
+    wateringStarted = 0;    // This will stop the watering
     return 1;
   }
   return 0;
@@ -416,11 +426,27 @@ int wateringEnabled(String command)                       // If I sense somethin
   if (command == "1")                                   // Default - enabled
   {
     waterEnabled = 1;
+    if (verboseMode) {
+      waitUntil(meterParticlePublish);
+      Particle.publish("State","Watering Enabled");
+      lastPublish = millis();
+    }
+    controlRegister = EEPROM.read(controlRegisterAddr);
+    controlRegister = (0b00000010 | controlRegister);                    // Enable Watering
+    EEPROM.write(controlRegisterAddr,controlRegister);                   // Write it to the register
     return 1;
   }
   else                            // Ensures no watering will occur
   {
     waterEnabled = 0;
+    if (verboseMode) {
+      waitUntil(meterParticlePublish);
+      Particle.publish("State","Watering Disabled");
+      lastPublish = millis();
+    }
+    controlRegister = EEPROM.read(controlRegisterAddr);
+    controlRegister = (0b11111101 & controlRegister);                    // Disable Watering
+    EEPROM.write(controlRegisterAddr,controlRegister);                   // Write it to the register
     return 1;
   }
 }
