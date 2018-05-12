@@ -40,7 +40,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.56"
+#define SOFTWARERELEASENUMBER "0.59"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -67,20 +67,23 @@ unsigned long lastPublish;                  // Keeps track of the last publish -
 // EEPROM Memory Map
 int controlRegisterAddr = 0;                // First Byte - Control Register
                                             // Control Register (7-2 Open, 1 - Enabled, 0 - Verbose Mode)
-int lastWateredPeriodAddr = 1;              // Sesond Byte - Last Watered Period (hour)
+int lastWateredHourAddr = 1;                // Second Byte - Last Watered Period (hour)
 int lastWateredDayAddr = 2;                 // Third Byte - Last Watered Day
-int resetCountAddr = 3;                     // Fourth Byte - Reset count
-int timeZoneAddr = 4;                       // Fifth Byte (signed) - Time zone
+int lastWateredMonthAddr = 3;               // Fourth Byte - Last Watered Month
+int resetCountAddr = 4;                     // Fifth Byte - Reset count
+int timeZoneAddr = 5;                       // Sixth Byte (signed) - Time zone
 
 // Control Variables
 bool waiting = false;                       // Keeps track of events which we need to wait to perform - like a reset
 byte controlRegister;                       // Stores the control register values
 bool verboseMode;                           // More chatty communciations with Particle to help in debugging - in controlRegister
 byte resetCount;                            // Too many resets are bad, this keeps track
-byte currentPeriod = 0;                     // Change length of period for testing 2 places in main loop
-byte lastWateredPeriod = 0;                 // So we only wanter once an hour
+byte currentHour = 0;                     // Change length of period for testing 2 places in main loop
+byte lastWateredHour = 0;                 // So we only wanter once an hour
 byte lastWateredDay = 0;                    // Need to reset the last watered period each day
+byte lastWateredMonth = 0;
 byte currentDay = 0;                        // Updated so we can tell which day we last watered
+byte currentMonth = 0;
 
 // Watering Variables
 int shortWaterMinutes = 1;                  // Short watering cycle
@@ -98,6 +101,8 @@ unsigned long wateringStarted = 0;
 char Signal[17];                            // Used to communicate Wireless RSSI and Description
 char* levels[6] = {"Poor", "Low", "Medium", "Good", "Very Good", "Great"};
 char* capDescription[6] = { "Very Dry", "Dry", "Normal", "Wet", "Very Wet", "Waterlogged"};
+char lastWateredString[32];
+char Temperature[8]="Test";
 char Rainfall[5];                           // Report Rainfall preduction
 int capValue = 0;                           // This is where we store the soil moisture sensor raw data
 int soilTemp = 0;                           // Soil Temp is measured 3" deep
@@ -130,8 +135,9 @@ void setup() {
   Particle.variable("Moisture", Moisture);
   Particle.variable("Enabled", waterEnabled);
   Particle.variable("Release",releaseNumber);
-  Particle.variable("LastWater",lastWateredPeriod);
+  Particle.variable("LastWater",lastWateredString);
   Particle.variable("RainFcst", Rainfall);
+  Particle.variable("SoilTemp",Temperature);
   Particle.function("start-stop", startStop);       // Here are the functions for easy control
   Particle.function("Enabled", wateringEnabled);    // I can disable watering simply here
   Particle.function("Measure", takeMeasurements);   // If we want to see Temp / Moisture values updated
@@ -159,11 +165,14 @@ void setup() {
     EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
   }
 
+  // Load all the state values from EEPROM on startup
   controlRegister = EEPROM.read(controlRegisterAddr);
   verboseMode = controlRegister  & 0b00000001;
   waterEnabled = controlRegister & 0b00000010;
-  lastWateredPeriod = EEPROM.read(lastWateredPeriodAddr);    // Load the last watered period from EEPROM
+  lastWateredHour = EEPROM.read(lastWateredHourAddr);    // Load the last watered period from EEPROM
   lastWateredDay = EEPROM.read(lastWateredDayAddr);          // Load the last watered day from EEPROM
+  lastWateredMonth = EEPROM.read(lastWateredMonthAddr);
+  sprintf(lastWateredString, "%u/%u %u:00", lastWateredMonth,lastWateredDay,lastWateredHour);
 
   if (sensor.getAddress() == 32) state = SENSING_STATE;    // Finished Initialization - time to enter main loop and wait for the top of the hour
   else state = ERROR_STATE;
@@ -183,10 +192,11 @@ void loop() {
         resetCount = 0;
         EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
       }
-      if (Time.hour() != currentPeriod)                       // Spring into action each hour on the hour
+      if (Time.hour() != currentHour)                       // Spring into action each hour on the hour
       {
-        currentPeriod = Time.hour();                          // Set the new current period
+        currentHour = Time.hour();                          // Set the new current period
         currentDay = Time.day();                              // Sets the current Day
+        currentMonth = Time.month();
         state = SENSING_STATE;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
@@ -197,15 +207,12 @@ void loop() {
       break;
 
     case SENSING_STATE:
-      getWiFiStrength();                                    // Get the WiFi Signal strength
-      soilTemp = int(sensor.getTemperature()/(float)10);    // Get the Soil temperature
-      while(sensor.isBusy());             // Wait to make sure sensor is ready.
-      if (!getMoisture())                 // Test soil Moisture - if valid then proceed
+      if (!getMeasurements())                 // Test soil Moisture - if valid then proceed
       {
         state = ERROR_STATE;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Error - getMoisture Failed");
+          Particle.publish("State","Error - Measurements Failed");
           lastPublish = millis();
         }
         break;
@@ -237,14 +244,14 @@ void loop() {
     case SCHEDULING_STATE:
       waitUntil(meterParticlePublish);
       state = FORECASTING_STATE;
-      if (currentPeriod < startWaterHour || currentPeriod > stopWaterHour)  // Outside watering window
+      if (currentHour < startWaterHour || currentHour > stopWaterHour)  // Outside watering window
       {
         strcpy(wateringContext,"Not Time");
         if(verboseMode) Particle.publish("State","Reporting - Not Time");
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
-      else if (currentPeriod != lastWateredPeriod || currentDay != lastWateredDay)  // protects against a reboot causing rewatering in same period
+      else if (currentHour == lastWateredHour && currentDay == lastWateredDay)  // protects against a reboot causing rewatering in same period
       {
         strcpy(wateringContext,"Already Watered This Period");
         if(verboseMode) Particle.publish("State","Reporting - Already Watered");
@@ -258,7 +265,7 @@ void loop() {
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
-      else if (currentPeriod == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
+      else if (currentHour == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
       else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
       if(verboseMode && state == FORECASTING_STATE) Particle.publish("State","Forecasting");
       lastPublish = millis();
@@ -315,10 +322,13 @@ void loop() {
         digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
         digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
         lastWateredDay = currentDay;
-        lastWateredPeriod = currentPeriod;
-        EEPROM.write(lastWateredPeriodAddr,currentPeriod);        // Sets the last watered period to the current one
-        EEPROM.write(lastWateredDayAddr,currentDay);              // Stored in EEPROM since this issue only comes in case of a reset
-        state = REPORTING_STATE;                                  // If this fails, the watchdog will reset
+        lastWateredHour = currentHour;
+        lastWateredMonth = currentMonth;
+        EEPROM.write(lastWateredHourAddr,currentHour);      // Sets the last watered period to the current one
+        EEPROM.write(lastWateredDayAddr,currentDay);            // Stored in EEPROM since this issue only comes in case of a reset
+        EEPROM.write(lastWateredMonthAddr,currentMonth);
+        sprintf(lastWateredString, "%u/%u %u:00", currentMonth,currentDay,currentHour);
+        state = REPORTING_STATE;                                // If this fails, the watchdog will reset
         if (verboseMode) {
           waitUntil(meterParticlePublish);
           Particle.publish("State","Reporting - Done Watering");
@@ -364,7 +374,7 @@ void loop() {
         {
           resetCount = 0;
           EEPROM.write(resetCountAddr,resetCount);    // If so, store incremented number - watchdog must have done This
-          currentPeriod = Time.hour();  // Let's wait an hour to report again.
+          currentHour = Time.hour();  // Let's wait an hour to report again.
           if (verboseMode) {
             waitUntil(meterParticlePublish);
             Particle.publish("State","Excess Resets - 1 hour break");
@@ -467,21 +477,25 @@ int takeMeasurements(String command)
   else return 0;                                              // Never get here but if we do, let's be safe and disable
 }
 
-int getWiFiStrength()
-{
-    int wifiRSSI = WiFi.RSSI();
-    if (wifiRSSI > 0) {
-        sprintf(Signal, "Error");
-    }else {
-        int strength = map(wifiRSSI, -127, -1, 0, 5);
-        sprintf(Signal, "%s: %d", levels[strength], wifiRSSI);
-    }
-    return 1;
-}
 
 
-int getMoisture()                                        // Here we get the soil moisture and characterize it to see if watering is needed
+int getMeasurements()             // Here we get the soil moisture and characterize it to see if watering is needed
 {
+  // First get the WiFi Signal Strength
+  int wifiRSSI = WiFi.RSSI();
+  if (wifiRSSI > 0) {
+      sprintf(Signal, "Error");
+  }else {
+      int strength = map(wifiRSSI, -127, -1, 0, 5);
+      sprintf(Signal, "%s: %d", levels[strength], wifiRSSI);
+  }
+  // Then take the Soil Temp
+  float tempTemp = (sensor.getTemperature()/(float)10);
+  soilTemp = int(tempTemp);    // Get the Soil temperature
+  int soilTempF = int(9.0*tempTemp/5.0 + 32.0);
+  snprintf(Temperature, sizeof(Temperature), "%i˚ F", soilTempF);
+  // Wait unti lthe sensor is ready, then get the soil moisture
+  while(sensor.isBusy());             // Wait to make sure sensor is ready.
   capValue = sensor.getCapacitance();                     // capValue is typically between 300 and 700
   if ((capValue <= 400) || (capValue >= 520))
   {
