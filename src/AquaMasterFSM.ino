@@ -34,13 +34,13 @@
 
 */
 
-STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // Use this line to enable the external WiFi Antenna
-//STARTUP(WiFi.selectAntenna(ANT_INTERNAL));    // Use this line to enable the external WiFi Antenna
+//STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // Use this line to enable the external WiFi Antenna
+STARTUP(WiFi.selectAntenna(ANT_INTERNAL));    // Use this line to enable the external WiFi Antenna
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.64"
+#define SOFTWARERELEASENUMBER "0.66"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -191,11 +191,13 @@ void setup() {
   EEPROM.get(rainThresholdAddr,rainThreshold);        // Load the rain threshold from Memory
   sprintf(RainThreshold, "%1.2f\"",rainThreshold);
 
+  int addressIs = sensor.getAddress();
+  Particle.publish("Address",String(addressIs));
   waitUntil(meterParticlePublish);
-  if (sensor.getAddress() == 32)
+  if (sensor.getAddress() == 255)
   {
-    state = SENSING_STATE; // Finished Initialization - time to enter main loop and get sensor data
-    if (verboseMode) Particle.publish("State","Sensing");
+    state = IDLE_STATE; // Finished Initialization - time to enter main loop and get sensor data
+    if (verboseMode) Particle.publish("State","Idle");
   }
   else
   {
@@ -442,6 +444,9 @@ int getMeasurements()             // Here we get the soil moisture and character
       int strength = map(wifiRSSI, -127, -1, 0, 5);
       sprintf(Signal, "%s: %d", levels[strength], wifiRSSI);
   }
+  // Need to take one measurment to "clear" the old values
+  sensor.getTemperature();
+  while(sensor.isBusy());
   // Then take the Soil Temp
   float tempTemp = (sensor.getTemperature()/(float)10);
   soilTemp = int(tempTemp);    // Get the Soil temperature
@@ -450,12 +455,12 @@ int getMeasurements()             // Here we get the soil moisture and character
   // Wait unti lthe sensor is ready, then get the soil moisture
   while(sensor.isBusy());             // Wait to make sure sensor is ready.
   capValue = sensor.getCapacitance();                     // capValue is typically between 300 and 700
-  if ((capValue <= 300) || (capValue >= 800))
+  if ((capValue <= 300) || (capValue >= 700))
   {
     sprintf(Moisture, "Out of Range: %d", capValue);
     //return 0;   // Quick check for a valid value
   }
-  int strength = map(capValue, 300, 800, 0, 5);           // Map - these values to cases that will use words that are easier to understand
+  int strength = map(capValue, 300, 700, 0, 5);           // Map - these values to cases that will use words that are easier to understand
   sprintf(Moisture, "%s: %d", capDescription[strength], capValue);
   return 1;
 }
