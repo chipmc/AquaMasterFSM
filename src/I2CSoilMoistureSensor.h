@@ -1,10 +1,13 @@
 /*----------------------------------------------------------------------*
- * I2CSoilMoistureSensor.h - Arduino library for the Sensor version of  *
- * I2C Soil Moisture Sensor version from Chrirp                         *
+ * I2CSoilMoistureSensor.cpp - Particle library for the Sensor version  *
+ * of I2C Soil Moisture Sensor version from Chirp                       *
  * (https://github.com/Miceuz/i2c-moisture-sensor).                     *
  *                                                                      *
+ * Original Arduino version:                                            *
  * Ingo Fischer 11Nov2015                                               *
  * https://github.com/Apollon77/I2CSoilMoistureSensor                   *
+ *                                                                      *
+ * Modified for Photon:  Mike Morales 27Nov2017                         *
  *                                                                      *
  * MIT license                                                          *
  *----------------------------------------------------------------------*/
@@ -12,12 +15,7 @@
 #ifndef I2CSOILMOISTURESENSOR_H
 #define I2CSOILMOISTURESENSOR_H
 
-
-#if defined(ARDUINO) && ARDUINO >= 100
-#include <Arduino.h>
-#else
-#include <WProgram.h>
-#endif
+#include "application.h"
 
 //Default I2C Address of the sensor
 #define SOILMOISTURESENSOR_DEFAULT_ADDR 0x20
@@ -57,8 +55,8 @@ class I2CSoilMoistureSensor {
 
         void writeI2CRegister8bit(int addr, int value);
         void writeI2CRegister8bit(int addr, int reg, int value);
-        uint16_t readI2CRegister16bitUnsigned(int addr, byte reg);
-        int16_t readI2CRegister16bitSigned(int addr, byte reg);
+        unsigned int readI2CRegister16bitUnsigned(int addr, int reg);
+        int readI2CRegister16bitSigned(int addr, int reg);
         uint8_t readI2CRegister8bit(int addr, int reg);
 };
 

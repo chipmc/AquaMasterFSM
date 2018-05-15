@@ -40,7 +40,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.62"
+#define SOFTWARERELEASENUMBER "0.64"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -76,25 +76,25 @@ int startWaterHourAddr = 6;                 // Seventh Byte - start watering hou
 int stopWaterHourAddr = 7;                  // Eighth Byte - stop watering hour
 int rainThresholdAddr = 8;                  // Nine - Twelfth Bytes (Float takes 4 bytes) - rain forcast threshold
 
-// Control Variables
+// Control Variables - No value assigned where we will populate from EEPROM in Setup()
 bool waiting = false;                       // Keeps track of events which we need to wait to perform - like a reset
-byte controlRegister;                       // Stores the control register values
+bool doneEnabled = true;                    // This enables petting the watchdog
 bool verboseMode;                           // More chatty communciations with Particle to help in debugging - in controlRegister
+byte controlRegister;                       // Stores the control register values
 byte resetCount;                            // Too many resets are bad, this keeps track
 byte currentHour = 0;                       // Change length of period for testing 2 places in main loop
-byte lastWateredHour = 0;                   // So we only wanter once an hour
-byte lastWateredDay = 0;                    // Need to reset the last watered period each day
-byte lastWateredMonth = 0;                  // For clarity in the Mobile application
 byte currentDay = 0;                        // Updated so we can tell which day we last watered
 byte currentMonth = 0;                      // What month are we in (numerical)
-bool doneEnabled = true;                    // This enables petting the watchdog
-byte startWaterHour = 5;                    // When can we start watering (24 hrs - local based on TimeZone)
-byte stopWaterHour = 8;                     // When do we stop for the day (24 hour time format)
-float rainThreshold = 0.45;                 // Expected rainfall in inches which would cause us not to water
+byte lastWateredHour;                       // So we only wanter once an hour
+byte lastWateredDay;                        // Need to reset the last watered period each day
+byte lastWateredMonth;                      // For clarity in the Mobile application
+byte startWaterHour;                        // When can we start watering (24 hrs - local based on TimeZone)
+byte stopWaterHour;                         // When do we stop for the day (24 hour time format)
+float rainThreshold;                        // Expected rainfall in inches which would cause us not to water
 
 // Watering Variables
-int shortWaterMinutes = 1;                  // Short watering cycle
-int longWaterMinutes = 5;                   // Long watering cycle - must be shorter than watchdog interval!
+const int shortWaterMinutes = 1;                  // Short watering cycle
+const int longWaterMinutes = 5;                   // Long watering cycle - must be shorter than watchdog interval!
 int wateringMinutes = 0;                    // How long will we water based on time or Moisture
 bool watering = false;                      // Status - watering?
 bool waterEnabled;                          // Allows you to disable watering from the app or Ubidots - in controlRegister
@@ -191,14 +191,18 @@ void setup() {
   EEPROM.get(rainThresholdAddr,rainThreshold);        // Load the rain threshold from Memory
   sprintf(RainThreshold, "%1.2f\"",rainThreshold);
 
-  if (sensor.getAddress() == 32) state = SENSING_STATE; // Finished Initialization - time to enter main loop and get sensor data
-
-  else state = ERROR_STATE;                             // If initialization fails, go straight to ERROR_STATE
-  if (verboseMode) {                                    // This block is repeated throughout the code - Publish at a metered rate if in verbose mode
-    waitUntil(meterParticlePublish);
-    Particle.publish("State","Idle");
-    lastPublish = millis();
+  waitUntil(meterParticlePublish);
+  if (sensor.getAddress() == 32)
+  {
+    state = SENSING_STATE; // Finished Initialization - time to enter main loop and get sensor data
+    if (verboseMode) Particle.publish("State","Sensing");
   }
+  else
+  {
+    state = ERROR_STATE;                             // If initialization fails, go straight to ERROR_STATE
+    if (verboseMode) Particle.publish("State","Error");
+  }
+  lastPublish = millis();
 }
 
 
@@ -262,7 +266,7 @@ void loop() {
     case SCHEDULING_STATE:
       waitUntil(meterParticlePublish);
       state = FORECASTING_STATE;
-      if (currentHour <= startWaterHour || currentHour >= stopWaterHour)  // Outside watering window
+      if (currentHour < startWaterHour || currentHour > stopWaterHour)  // Outside watering window
       {
         strcpy(wateringContext,"Not Time");
         if(verboseMode) Particle.publish("State","Reporting - Not Time");
@@ -446,12 +450,12 @@ int getMeasurements()             // Here we get the soil moisture and character
   // Wait unti lthe sensor is ready, then get the soil moisture
   while(sensor.isBusy());             // Wait to make sure sensor is ready.
   capValue = sensor.getCapacitance();                     // capValue is typically between 300 and 700
-  if ((capValue <= 400) || (capValue >= 520))
+  if ((capValue <= 300) || (capValue >= 800))
   {
     sprintf(Moisture, "Out of Range: %d", capValue);
     //return 0;   // Quick check for a valid value
   }
-  int strength = map(capValue, 400, 520, 0, 5);           // Map - these values to cases that will use words that are easier to understand
+  int strength = map(capValue, 300, 800, 0, 5);           // Map - these values to cases that will use words that are easier to understand
   sprintf(Moisture, "%s: %d", capDescription[strength], capValue);
   return 1;
 }
@@ -685,7 +689,7 @@ int setRainThreshold(String command)
   if ((tempRain < 0) || (tempRain > 2)) return 0;              // Make sure it falls in a valid range or send a "fail" result
   rainThreshold = tempRain;
   EEPROM.put(rainThresholdAddr,rainThreshold);              // Store the new value in EEPROM
-  snprintf(data, sizeof(data), "Rain threshold set to %f",rainThreshold);
+  snprintf(data, sizeof(data), "Rain threshold set to %1.2f",rainThreshold);
   sprintf(RainThreshold, "%1.2f\"",rainThreshold);
   if (verboseMode) {
     waitUntil(meterParticlePublish);

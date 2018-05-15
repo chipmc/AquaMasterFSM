@@ -1,26 +1,27 @@
 /*----------------------------------------------------------------------*
- * I2CSoilMoistureSensor.cpp - Arduino library for the Sensor version of*
- * I2C Soil Moisture Sensor version from Chrirp                         *
+ * I2CSoilMoistureSensor.cpp - Particle library for the Sensor version  *
+ * of I2C Soil Moisture Sensor version from Chirp                       *
  * (https://github.com/Miceuz/i2c-moisture-sensor).                     *
  *                                                                      *
+ * Original Arduino version:                                            *
  * Ingo Fischer 11Nov2015                                               *
  * https://github.com/Apollon77/I2CSoilMoistureSensor                   *
+ *                                                                      *
+ * Modified for Photon:  Mike Morales 27Nov2017                         *
  *                                                                      *
  * MIT license                                                          *
  *----------------------------------------------------------------------*/
 
 #include "I2CSoilMoistureSensor.h"
 
-//define release-independent I2C functions
+
 #include "Particle.h"
-#define i2cBegin Wire.begin
+#define i2cBegin             Wire.begin
 #define i2cBeginTransmission Wire.beginTransmission
-#define i2cEndTransmission Wire.endTransmission
-#define i2cRequestFrom Wire.requestFrom
-#define i2cRead Wire.read
-#define i2cWrite Wire.write
-
-
+#define i2cEndTransmission   Wire.endTransmission
+#define i2cRequestFrom       Wire.requestFrom
+#define i2cRead              Wire.read
+#define i2cWrite             Wire.write
 
 /*----------------------------------------------------------------------*
  * Constructor.                                                         *
@@ -84,7 +85,8 @@ void I2CSoilMoistureSensor::changeSensor(int addr, bool wait) {
  * Return current Address of the Sensor                                 *
  *----------------------------------------------------------------------*/
 uint8_t I2CSoilMoistureSensor::getAddress() {
-  return sensorAddress;
+     return readI2CRegister8bit(sensorAddress, SOILMOISTURESENSOR_GET_ADDRESS);
+ // return sensorAddress;
 }
 
 /*----------------------------------------------------------------------*
@@ -179,27 +181,29 @@ void I2CSoilMoistureSensor::writeI2CRegister8bit(int addr, int reg, int value) {
 /*----------------------------------------------------------------------*
  * Helper method to read a 16 bit unsigned value from the given register*
  *----------------------------------------------------------------------*/
-uint16_t I2CSoilMoistureSensor::readI2CRegister16bitUnsigned(int addr, byte reg)
-{
-  uint16_t value;
-
-  i2cBeginTransmission((uint8_t)addr);
-  i2cWrite((uint8_t)reg);
+unsigned int I2CSoilMoistureSensor::readI2CRegister16bitUnsigned(int addr, int reg) {
+  i2cBeginTransmission(addr);
+  i2cWrite(reg);
   i2cEndTransmission();
   delay(20);
-  i2cRequestFrom((uint8_t)addr, (byte)2);
-  value = (i2cRead() << 8) | i2cRead();
-  i2cEndTransmission();
-
-  return value;
+  i2cRequestFrom(addr, 2);
+  unsigned int t = i2cRead() << 8;
+  t = t | i2cRead();
+  return t;
 }
 
 /*----------------------------------------------------------------------*
  * Helper method to read a 16 bit signed value from the given register*
  *----------------------------------------------------------------------*/
-int16_t I2CSoilMoistureSensor::readI2CRegister16bitSigned(int addr, byte reg)
-{
-  return (int16_t)readI2CRegister16bitUnsigned(addr, reg);
+int I2CSoilMoistureSensor::readI2CRegister16bitSigned(int addr, int reg) {
+  i2cBeginTransmission(addr);
+  i2cWrite(reg);
+  i2cEndTransmission();
+  delay(20);
+  i2cRequestFrom(addr, 2);
+  int t = i2cRead() << 8;
+  t = t | i2cRead();
+  return t;
 }
 
 /*----------------------------------------------------------------------*
