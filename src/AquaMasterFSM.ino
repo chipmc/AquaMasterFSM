@@ -40,7 +40,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.66"
+#define SOFTWARERELEASENUMBER "0.68"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -191,8 +191,6 @@ void setup() {
   EEPROM.get(rainThresholdAddr,rainThreshold);        // Load the rain threshold from Memory
   sprintf(RainThreshold, "%1.2f\"",rainThreshold);
 
-  int addressIs = sensor.getAddress();
-  Particle.publish("Address",String(addressIs));
   waitUntil(meterParticlePublish);
   if (sensor.getAddress() == 255)
   {
@@ -231,7 +229,7 @@ void loop() {
       break;
 
     case SENSING_STATE:
-      if (!getMeasurements())                 // Test soil Moisture - if valid then proceed
+      if (!getMeasurements())                               // Test soil Moisture - if valid then proceed
       {
         state = ERROR_STATE;
         if (verboseMode) {
@@ -253,9 +251,6 @@ void loop() {
       }
       else
       {
-        Particle.publish("weatherU_hook");                    // Get the weather forcast
-        publishTimeStamp = millis();                          // So we can know how long to wait
-        forecastDay = expectedRainfallToday = 0;              // So we know when we get an updated forecast
         if (verboseMode) {
           waitUntil(meterParticlePublish);
           Particle.publish("State","Scheduling");
@@ -300,10 +295,10 @@ void loop() {
       if ((millis() >= (publishTimeStamp + webhookWaitTime)) || forecastDay)
       {
         state = WATERING_STATE;
-
         if (expectedRainfallToday > rainThreshold)
         {
           strcpy(wateringContext,"Heavy Rain Expected");
+          wateringMinutes = 0;
           if (verboseMode) {
             waitUntil(meterParticlePublish);
             Particle.publish("State","Reporting - Rain Forecast");
@@ -329,13 +324,16 @@ void loop() {
           Particle.publish("State","Started Watering");
           lastPublish = millis();
         }
-        digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
-        digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
-        doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
-        digitalWrite(solenoidPin, HIGH);                        // Turn on the water
-        digitalWrite(solenoidPin2,HIGH);
-        watering = true;
-        wateringStarted = millis();
+        if (wateringMinutes)
+        {
+          digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
+          digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
+          doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
+          digitalWrite(solenoidPin, HIGH);                        // Turn on the water
+          digitalWrite(solenoidPin2,HIGH);
+          watering = true;
+          wateringStarted = millis();
+        }
       }
       if (watering && millis() >= (wateringStarted + wateringMinutes * oneMinuteMillis))
       {
@@ -436,7 +434,11 @@ void sendToUbidots()                                      // Houly update to Ubi
 
 int getMeasurements()             // Here we get the soil moisture and characterize it to see if watering is needed
 {
-  // First get the WiFi Signal Strength
+  // First get the weather forecast
+  Particle.publish("weatherU_hook");                    // Get the weather forcast
+  publishTimeStamp = millis();                          // So we can know how long to wait
+  forecastDay = expectedRainfallToday = 0;              // So we know when we get an updated forecast
+  // Then get the WiFi Signal Strength
   int wifiRSSI = WiFi.RSSI();
   if (wifiRSSI > 0) {
       sprintf(Signal, "Error");
@@ -455,12 +457,12 @@ int getMeasurements()             // Here we get the soil moisture and character
   // Wait unti lthe sensor is ready, then get the soil moisture
   while(sensor.isBusy());             // Wait to make sure sensor is ready.
   capValue = sensor.getCapacitance();                     // capValue is typically between 300 and 700
-  if ((capValue <= 300) || (capValue >= 700))
+  if ((capValue <= 300) || (capValue >= 420))
   {
     sprintf(Moisture, "Out of Range: %d", capValue);
     //return 0;   // Quick check for a valid value
   }
-  int strength = map(capValue, 300, 700, 0, 5);           // Map - these values to cases that will use words that are easier to understand
+  int strength = map(capValue, 300, 420, 0, 5);           // Map - these values to cases that will use words that are easier to understand
   sprintf(Moisture, "%s: %d", capDescription[strength], capValue);
   return 1;
 }
