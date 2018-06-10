@@ -40,7 +40,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.68"
+#define SOFTWARERELEASENUMBER "0.72"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -106,13 +106,13 @@ int soilTemp = 0;                           // Soil Temp is measured 3" deep
 
 
 // Variables to capture and communicate with Particle and Ubidots
-char Signal[17];                            // Used to communicate Wireless RSSI and Description
+char SignalString[17];                            // Used to communicate Wireless RSSI and Description
 char* levels[6] = {"Poor", "Low", "Medium", "Good", "Very Good", "Great"};
 char* capDescription[6] = { "Very Dry", "Dry", "Normal", "Wet", "Very Wet", "Waterlogged"};
 char lastWateredString[13];                 // Allows us to display a properly formatted last watered value in mobile app
 char Temperature[8];                        // Format Temp with correct units displayed
 char Rainfall[5];                           // Report Rainfall preduction
-char Moisture[15];                          // Combines description and capValue
+char Moisture[20];                          // Combines description and capValue
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 char wateringContext[25];                   // Why did we water or not sent to Ubidots for context
 char Enabled[9];                            // For easy reading on the mobile app
@@ -135,7 +135,7 @@ void setup() {
   pinMode(wakeUpPin,INPUT_PULLDOWN);              // The signal from the watchdog is active HIGH
   attachInterrupt(wakeUpPin, watchdogISR, RISING);// The watchdog timer will signal us and we have to respond
 
-  Particle.variable("WiFiStrength", Signal);      // These variables are used to monitor the device will reduce them over time
+  Particle.variable("WiFiStrength", SignalString);      // These variables are used to monitor the device will reduce them over time
   Particle.variable("Moisture", Moisture);        // Soil moisture Level
   Particle.variable("Enabled", Enabled);     // Shows whether watering is enabled
   Particle.variable("Release",releaseNumber);     // So we can see the software release running
@@ -242,6 +242,7 @@ void loop() {
       else if((strncmp(Moisture,"Wet",3) == 0) || (strncmp(Moisture,"Very Wet",8) == 0) || (strncmp(Moisture,"Waterlogged",11) == 0))
       {
         strcpy(wateringContext,"Not Needed");
+        wateringMinutes = 0;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
           Particle.publish("State","Reporting - Too Wet");
@@ -328,7 +329,7 @@ void loop() {
         {
           digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
           digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
-          doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
+          // doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
           digitalWrite(solenoidPin, HIGH);                        // Turn on the water
           digitalWrite(solenoidPin2,HIGH);
           watering = true;
@@ -341,6 +342,7 @@ void loop() {
         digitalWrite(solenoidPin2,LOW);
         watering = false;
         doneEnabled = true;                                     // Successful response - can pet the dog again
+        wateringMinutes = 0;                                    // reset the watering minutes
         digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
         digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
         lastWateredDay = currentDay;
@@ -441,10 +443,10 @@ int getMeasurements()             // Here we get the soil moisture and character
   // Then get the WiFi Signal Strength
   int wifiRSSI = WiFi.RSSI();
   if (wifiRSSI > 0) {
-      sprintf(Signal, "Error");
+      sprintf(SignalString, "Error");
   }else {
       int strength = map(wifiRSSI, -127, -1, 0, 5);
-      sprintf(Signal, "%s: %d", levels[strength], wifiRSSI);
+      sprintf(SignalString, "%s: %d", levels[strength], wifiRSSI);
   }
   // Need to take one measurment to "clear" the old values
   sensor.getTemperature();
@@ -457,13 +459,13 @@ int getMeasurements()             // Here we get the soil moisture and character
   // Wait unti lthe sensor is ready, then get the soil moisture
   while(sensor.isBusy());             // Wait to make sure sensor is ready.
   capValue = sensor.getCapacitance();                     // capValue is typically between 300 and 700
-  if ((capValue <= 300) || (capValue >= 420))
+  if ((capValue <= 320) || (capValue >= 550))
   {
-    sprintf(Moisture, "Out of Range: %d", capValue);
+    snprintf(Moisture, sizeof(Moisture), "Out of Range: %d", capValue);
     //return 0;   // Quick check for a valid value
   }
-  int strength = map(capValue, 300, 420, 0, 5);           // Map - these values to cases that will use words that are easier to understand
-  sprintf(Moisture, "%s: %d", capDescription[strength], capValue);
+  int strength = map(capValue, 350, 550, 0, 5);           // Map - these values to cases that will use words that are easier to understand
+  snprintf(Moisture, sizeof(Moisture), "%s: %d", capDescription[strength], capValue);
   return 1;
 }
 
