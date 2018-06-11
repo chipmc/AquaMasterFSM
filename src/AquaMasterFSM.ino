@@ -40,7 +40,7 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.72"
+#define SOFTWARERELEASENUMBER "0.73"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -302,7 +302,7 @@ void loop() {
           wateringMinutes = 0;
           if (verboseMode) {
             waitUntil(meterParticlePublish);
-            Particle.publish("State","Reporting - Rain Forecast");
+            Particle.publish("State","Reporting - Rain Forecasted");
             lastPublish = millis();
           }
           state = REPORTING_STATE;
@@ -325,8 +325,7 @@ void loop() {
           Particle.publish("State","Started Watering");
           lastPublish = millis();
         }
-        if (wateringMinutes)
-        {
+        if (wateringMinutes) {
           digitalWrite(donePin, HIGH);                            // We will pet the dog now so we have the full interval to water
           digitalWrite(donePin, LOW);                             // We set the delay resistor to 50k or 7 mins so that is the longest watering duration
           // doneEnabled = false;                                    // Will suspend watchdog petting until water is turned off
@@ -342,7 +341,6 @@ void loop() {
         digitalWrite(solenoidPin2,LOW);
         watering = false;
         doneEnabled = true;                                     // Successful response - can pet the dog again
-        wateringMinutes = 0;                                    // reset the watering minutes
         digitalWrite(donePin, HIGH);                            // If an interrupt came in while petting disabled, we missed it so...
         digitalWrite(donePin, LOW);                             // will pet the fdog just to be safe
         lastWateredDay = currentDay;
@@ -381,12 +379,12 @@ void loop() {
       }
       else if (waiting && millis() >= (publishTimeStamp + webhookWaitTime))
       {
-        state = ERROR_STATE;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
           Particle.publish("State","Error - Reporting Timed Out");
           lastPublish = millis();
         }
+        state = ERROR_STATE;
         waiting = false;
       }
       break;
