@@ -3,6 +3,7 @@
  * Description: Watering program for the back deck
  * Author: Chip McClelland
  * Date: 5/8/2018
+ 
 
  Wiring for Chirp (Board/Assign/Cable) - Red/Vcc/Orange, Black/GND/Green, Blue/SCL/Green&White, Yellow/SDA/Orange&White
 
@@ -34,13 +35,16 @@
 
 */
 
-//STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // Use this line to enable the external WiFi Antenna
-STARTUP(WiFi.selectAntenna(ANT_INTERNAL));    // Use this line to enable the external WiFi Antenna
+// v0.74 - Took out call to WeatherUnderground - need to find a new weather API - new Particle device OS
+
+
+STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));      // Use this line to enable the external WiFi Antenna
+//STARTUP(WiFi.selectAntenna(ANT_INTERNAL));    // Use this line to enable the external WiFi Antenna
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));  // Track why we reset
 SYSTEM_THREAD(ENABLED);
 
 // Software Release lets me know what version the Particle is running
-#define SOFTWARERELEASENUMBER "0.73"
+#define SOFTWARERELEASENUMBER "0.74"
 
 // Included Libraries
 #include <I2CSoilMoistureSensor.h>          // Apollon77's Chirp Library: https://github.com/Apollon77/I2CSoilMoistureSensor
@@ -111,7 +115,7 @@ char* levels[6] = {"Poor", "Low", "Medium", "Good", "Very Good", "Great"};
 char* capDescription[6] = { "Very Dry", "Dry", "Normal", "Wet", "Very Wet", "Waterlogged"};
 char lastWateredString[13];                 // Allows us to display a properly formatted last watered value in mobile app
 char Temperature[8];                        // Format Temp with correct units displayed
-char Rainfall[5];                           // Report Rainfall preduction
+char Rainfall[5] = "N/A";                           // Report Rainfall preduction
 char Moisture[20];                          // Combines description and capValue
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 char wateringContext[25];                   // Why did we water or not sent to Ubidots for context
@@ -161,7 +165,7 @@ void setup() {
   String deviceID = System.deviceID();            // Unique to your Photon
   deviceID.toCharArray(responseTopic,125);
   Particle.subscribe(responseTopic, AquaMasterHandler, MY_DEVICES);       // Subscribe to the integration response event
-  Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
+  //Particle.subscribe("hook-response/weatherU_hook", weatherHandler, MY_DEVICES);       // Subscribe to weather response
 
   int8_t tempTimeZoneOffset = EEPROM.read(timeZoneAddr);// Load Time zone data from EEPROM
   if (tempTimeZoneOffset > -12 && tempTimeZoneOffset < 12) Time.zone((float)tempTimeZoneOffset);
@@ -195,12 +199,12 @@ void setup() {
   if (sensor.getAddress() == 255)
   {
     state = IDLE_STATE; // Finished Initialization - time to enter main loop and get sensor data
-    if (verboseMode) Particle.publish("State","Idle");
+    if (verboseMode) Particle.publish("State","Idle", PRIVATE);
   }
   else
   {
     state = ERROR_STATE;                             // If initialization fails, go straight to ERROR_STATE
-    if (verboseMode) Particle.publish("State","Error");
+    if (verboseMode) Particle.publish("State","Error", PRIVATE);
   }
   lastPublish = millis();
 }
@@ -222,7 +226,7 @@ void loop() {
         state = SENSING_STATE;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Sensing");
+          Particle.publish("State","Sensing", PRIVATE);
           lastPublish = millis();
         }
       }
@@ -234,7 +238,7 @@ void loop() {
         state = ERROR_STATE;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Error - Measurements Failed");
+          Particle.publish("State","Error - Measurements Failed", PRIVATE);
           lastPublish = millis();
         }
         break;
@@ -245,7 +249,7 @@ void loop() {
         wateringMinutes = 0;
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Reporting - Too Wet");
+          Particle.publish("State","Reporting - Too Wet", PRIVATE);
           lastPublish = millis();
         }
         state = REPORTING_STATE;
@@ -254,7 +258,7 @@ void loop() {
       {
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Scheduling");
+          Particle.publish("State","Scheduling", PRIVATE);
           lastPublish = millis();
         }
         state = SCHEDULING_STATE;
@@ -267,27 +271,27 @@ void loop() {
       if (currentHour < startWaterHour || currentHour > stopWaterHour)  // Outside watering window
       {
         strcpy(wateringContext,"Not Time");
-        if(verboseMode) Particle.publish("State","Reporting - Not Time");
+        if(verboseMode) Particle.publish("State","Reporting - Not Time", PRIVATE);
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
       else if (currentHour == lastWateredHour && currentDay == lastWateredDay)  // protects against a reboot causing rewatering in same period
       {
         strcpy(wateringContext,"Already Watered This Period");
-        if(verboseMode) Particle.publish("State","Reporting - Already Watered");
+        if(verboseMode) Particle.publish("State","Reporting - Already Watered", PRIVATE);
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
       else if (!waterEnabled) // Check to ensure watering is Enabled
       {
         strcpy(wateringContext,"Not Enabled");
-        if(verboseMode) Particle.publish("State","Reporting - Not Enabled");
+        if(verboseMode) Particle.publish("State","Reporting - Not Enabled", PRIVATE);
         wateringMinutes = 0;
         state = REPORTING_STATE;
       }
       else if (currentHour == startWaterHour) wateringMinutes = longWaterMinutes;  // So, the first watering is long
       else wateringMinutes = shortWaterMinutes;                                 // Subsequent are short - fine tuning
-      if(verboseMode && state == FORECASTING_STATE) Particle.publish("State","Forecasting");
+      if(verboseMode && state == FORECASTING_STATE) Particle.publish("State","Forecasting", PRIVATE);
       lastPublish = millis();
       break;
 
@@ -302,7 +306,7 @@ void loop() {
           wateringMinutes = 0;
           if (verboseMode) {
             waitUntil(meterParticlePublish);
-            Particle.publish("State","Reporting - Rain Forecasted");
+            Particle.publish("State","Reporting - Rain Forecasted", PRIVATE);
             lastPublish = millis();
           }
           state = REPORTING_STATE;
@@ -310,7 +314,7 @@ void loop() {
       }
       if (verboseMode && state == WATERING_STATE) {
         waitUntil(meterParticlePublish);
-        Particle.publish("State","Watering");
+        Particle.publish("State","Watering", PRIVATE);
         lastPublish = millis();
       }
       break;
@@ -322,7 +326,7 @@ void loop() {
         strcpy(wateringContext,"Watering");
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Started Watering");
+          Particle.publish("State","Started Watering", PRIVATE);
           lastPublish = millis();
         }
         if (wateringMinutes) {
@@ -353,7 +357,7 @@ void loop() {
         state = REPORTING_STATE;                                // If this fails, the watchdog will reset
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Reporting - Done Watering");
+          Particle.publish("State","Reporting - Done Watering", PRIVATE);
           lastPublish = millis();
         }
       }
@@ -371,7 +375,7 @@ void loop() {
       {
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Idle");
+          Particle.publish("State","Idle", PRIVATE);
           lastPublish = millis();
         }
         state = IDLE_STATE;       // This is how we know if Ubidots got the data
@@ -381,7 +385,7 @@ void loop() {
       {
         if (verboseMode) {
           waitUntil(meterParticlePublish);
-          Particle.publish("State","Error - Reporting Timed Out");
+          Particle.publish("State","Error - Reporting Timed Out", PRIVATE);
           lastPublish = millis();
         }
         state = ERROR_STATE;
@@ -399,7 +403,7 @@ void loop() {
           currentHour = Time.hour();  // Let's wait an hour to report again.
           if (verboseMode) {
             waitUntil(meterParticlePublish);
-            Particle.publish("State","Excess Resets - 1 hour break");
+            Particle.publish("State","Excess Resets - 1 hour break", PRIVATE);
             lastPublish = millis();
           }
           state =IDLE_STATE;
@@ -409,7 +413,7 @@ void loop() {
           resetWaitTimeStamp = millis();
           if (verboseMode) {
             waitUntil(meterParticlePublish);
-            Particle.publish("State","Resetting in 30 sec");
+            Particle.publish("State","Resetting in 30 sec", PRIVATE);
             lastPublish = millis();
           }
         }
@@ -435,9 +439,10 @@ void sendToUbidots()                                      // Houly update to Ubi
 int getMeasurements()             // Here we get the soil moisture and characterize it to see if watering is needed
 {
   // First get the weather forecast
-  Particle.publish("weatherU_hook");                    // Get the weather forcast
-  publishTimeStamp = millis();                          // So we can know how long to wait
-  forecastDay = expectedRainfallToday = 0;              // So we know when we get an updated forecast
+  //Particle.publish("weatherU_hook");                    // Get the weather forcast
+  ///publishTimeStamp = millis();                         // So we can know how long to wait
+  forecastDay = Time.day();                               // Have to fake out the Weather webhook until we replace it
+  expectedRainfallToday = 0;                              // So we know when we get an updated forecast
   // Then get the WiFi Signal Strength
   int wifiRSSI = WiFi.RSSI();
   if (wifiRSSI > 0) {
@@ -477,6 +482,7 @@ void NonBlockingDelay(int millisDelay)                    // Used for a non-bloc
   return;
 }
 
+/*  Wunderground has cut off access to its API - need to change this out.
 void weatherHandler(const char *event, const char *data)  // Extracts the expected rainfall for today from webhook response
 {
   // Uses forecast JSON for Raleigh-Durham Airport
@@ -492,17 +498,18 @@ void weatherHandler(const char *event, const char *data)  // Extracts the expect
   }
   char strBuffer[30] = "";                                // Create character array to hold response
   strcpy(strBuffer,data);                                 // Copy into the array
-  forecastDay = atoi(strtok(strBuffer, "\"~"));       // Use the delimiter to find today's date and expected Rainfall
+  forecastDay = atoi(strtok(strBuffer, "\"~"));           // Use the delimiter to find today's date and expected Rainfall
   expectedRainfallToday = atof(strtok(NULL, "~"));
   snprintf(Rainfall,sizeof(Rainfall),"%4.2f",expectedRainfallToday);
 }
+*/
 
 void AquaMasterHandler(const char *event, const char *data)  // Looks at the response from Ubidots - Will reset Photon if no successful response
 {
   // Response Template: "{{watering.0.status_code}}"
   if (!data && verboseMode) {                                            // First check to see if there is any data
     waitUntil(meterParticlePublish);
-    Particle.publish("AquaMaster", "No Data");
+    Particle.publish("AquaMaster", "No Data", PRIVATE);
     lastPublish = millis();
     return;
   }
@@ -511,7 +518,7 @@ void AquaMasterHandler(const char *event, const char *data)  // Looks at the res
   {
     if (verboseMode) {
       waitUntil(meterParticlePublish);
-      Particle.publish("AquaMaster","Success");
+      Particle.publish("AquaMaster","Success", PRIVATE);
       lastPublish = millis();
     }
     doneEnabled = true;                                   // Successful response - can pet the dog again
@@ -521,7 +528,7 @@ void AquaMasterHandler(const char *event, const char *data)  // Looks at the res
   else if (verboseMode)
   {
     waitUntil(meterParticlePublish);
-    Particle.publish("AquaMaster", data);             // Publish the response code
+    Particle.publish("AquaMaster", data, PRIVATE);             // Publish the response code
     lastPublish = millis();
   }
 }
@@ -543,7 +550,7 @@ int startStop(String command)                             // So we can manually 
     strcpy(wateringContext,"User Initiated");             // Add the right context for publishing
     if (verboseMode) {
       waitUntil(meterParticlePublish);
-      Particle.publish("State","Watering - User Initiated");
+      Particle.publish("State","Watering - User Initiated", PRIVATE);
       lastPublish = millis();
     }
     state = WATERING_STATE;
@@ -553,7 +560,7 @@ int startStop(String command)                             // So we can manually 
   {
     if (verboseMode) {
       waitUntil(meterParticlePublish);
-      Particle.publish("State","Stopped Watering - User Initiated");
+      Particle.publish("State","Stopped Watering - User Initiated", PRIVATE);
       lastPublish = millis();
     }
     wateringStarted = 0;    // This will stop the watering
@@ -569,7 +576,7 @@ int wateringEnabled(String command)                       // If I sense somethin
     waterEnabled = 1;
     if (verboseMode) {
       waitUntil(meterParticlePublish);
-      Particle.publish("State","Watering Enabled");
+      Particle.publish("State","Watering Enabled", PRIVATE);
       lastPublish = millis();
     }
     sprintf(Enabled, "true");
@@ -583,7 +590,7 @@ int wateringEnabled(String command)                       // If I sense somethin
     waterEnabled = 0;
     if (verboseMode) {
       waitUntil(meterParticlePublish);
-      Particle.publish("State","Watering Disabled");
+      Particle.publish("State","Watering Disabled", PRIVATE);
       lastPublish = millis();
     }
     sprintf(Enabled, "false");
@@ -616,10 +623,10 @@ int setTimeZone(String command)
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
   if (verboseMode) {
     waitUntil(meterParticlePublish);
-    Particle.publish("Time",data);
+    Particle.publish("Time",data, PRIVATE);
     lastPublish = millis();
     waitUntil(meterParticlePublish);
-    Particle.publish("Time",Time.timeStr(t));
+    Particle.publish("Time",Time.timeStr(t), PRIVATE);
     lastPublish = millis();
   }
   return 1;
@@ -634,7 +641,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegister = (0b00000001 | controlRegister);                    // Turn on verboseMode
     EEPROM.write(controlRegisterAddr,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
-    Particle.publish("Mode","Set Verbose Mode");
+    Particle.publish("Mode","Set Verbose Mode", PRIVATE);
     lastPublish = millis();
     return 1;
   }
@@ -645,7 +652,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegister = (0b11111110 & controlRegister);                    // Turn off verboseMode
     EEPROM.write(controlRegisterAddr,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
-    Particle.publish("Mode","Cleared Verbose Mode");
+    Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
     lastPublish = millis();
     return 1;
   }
@@ -664,7 +671,7 @@ int setStartWaterTime(String command)
   sprintf(StartTime, "%u:00",startWaterHour);
   if (verboseMode) {
     waitUntil(meterParticlePublish);
-    Particle.publish("Time",data);
+    Particle.publish("Time",data, PRIVATE);
     lastPublish = millis();
   }
   return 1;
@@ -682,7 +689,7 @@ int setStopWaterTime(String command)
   sprintf(StopTime, "%u:00",stopWaterHour);
   if (verboseMode) {
     waitUntil(meterParticlePublish);
-    Particle.publish("Time",data);
+    Particle.publish("Time",data, PRIVATE);
     lastPublish = millis();
   }
   return 1;
@@ -700,7 +707,7 @@ int setRainThreshold(String command)
   sprintf(RainThreshold, "%1.2f\"",rainThreshold);
   if (verboseMode) {
     waitUntil(meterParticlePublish);
-    Particle.publish("Contol",data);
+    Particle.publish("Contol",data, PRIVATE);
     lastPublish = millis();
   }
   return 1;
